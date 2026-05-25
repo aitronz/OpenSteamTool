@@ -95,9 +95,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved)
     }
     else if (dwReason == DLL_PROCESS_DETACH)
     {
-        FileWatcher::Stop();
-        SteamUI::CoreUnhook();
-        SteamClient::CoreUnhook();
+        // DllMain runs under loader lock. Blocking joins or Detours transactions
+        // here can deadlock the process during shutdown/unload.
+        (void)pvReserved;
     }
 
     return TRUE;
