@@ -28,7 +28,11 @@ namespace Hooks_Misc {
     AppId_t ResolveAppId();
 
     // Select real app identity while forwarding OnlineFix user-stats calls.
-    void SetUserStatsContext(bool active);
+    void SetUserStatsContext(HSteamPipe hSteamPipe, bool active);
+
+    // Present real-app stats callbacks through the OnlineFix game identity.
+    bool RewriteOnlineFixUserStatsCallback(HSteamPipe hSteamPipe, uint64& gameId);
+    bool ShouldRouteOnlineFixUserStatsCallback(AppId_t routeAppId);
 
     // Get localized game name via GetAppDataFromAppInfo (cached).
     std::string GetGameNameByAppID(AppId_t appId);

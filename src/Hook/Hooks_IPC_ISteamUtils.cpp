@@ -36,7 +36,7 @@ namespace {
     // ════════════════════════════════════════════════════════════════
 
     bool HandleCallback_EncryptedAppTicketResponse(
-        CUtlBuffer* pWrite, uint64 hAsyncCall, uint32 cubCallback)
+        CSteamPipeClient*, CUtlBuffer* pWrite, uint64 hAsyncCall, uint32 cubCallback)
     {
         AppId_t appId = Hooks_IPC_ISteamUser::LookupEticketAsyncCall(hAsyncCall);
         if (!appId) return false;
@@ -52,18 +52,64 @@ namespace {
         return true;
     }
 
+    template<typename CallbackT>
+    bool RewriteOnlineFixStatsResult(
+        CSteamPipeClient* pipe, CUtlBuffer* pWrite, const char* name, uint32 cubCallback)
+    {
+        constexpr int32 total = 1 + 1 + sizeof(CallbackT) + 1;
+        if (!pipe || cubCallback < sizeof(CallbackT) || pWrite->m_Put < total
+            || pWrite->Base()[1] == 0) {
+            return false;
+        }
+
+        auto* cb = reinterpret_cast<CallbackT*>(pWrite->Base() + 2);
+        const uint64 previous = cb->m_nGameID;
+        if (!Hooks_Misc::RewriteOnlineFixUserStatsCallback(pipe->m_hSteamPipe, cb->m_nGameID))
+            return false;
+
+        LOG_IPC_TRACE("GetAPICallResult: OnlineFix {} CGameID {:#x} -> {:#x}",
+                      name, previous, cb->m_nGameID);
+        return true;
+    }
+
+    bool HandleCallback_UserStatsReceived(
+        CSteamPipeClient* pipe, CUtlBuffer* pWrite, uint64, uint32 cubCallback)
+    {
+        return RewriteOnlineFixStatsResult<UserStatsReceived_t>(
+            pipe, pWrite, "UserStatsReceived", cubCallback);
+    }
+
+    bool HandleCallback_GlobalAchievementPercentagesReady(
+        CSteamPipeClient* pipe, CUtlBuffer* pWrite, uint64, uint32 cubCallback)
+    {
+        return RewriteOnlineFixStatsResult<GlobalAchievementPercentagesReady_t>(
+            pipe, pWrite, "GlobalAchievementPercentagesReady", cubCallback);
+    }
+
+    bool HandleCallback_GlobalStatsReceived(
+        CSteamPipeClient* pipe, CUtlBuffer* pWrite, uint64, uint32 cubCallback)
+    {
+        return RewriteOnlineFixStatsResult<GlobalStatsReceived_t>(
+            pipe, pWrite, "GlobalStatsReceived", cubCallback);
+    }
+
     struct GacrDispatchEntry {
         uint32  callbackId;
-        bool  (*handler)(CUtlBuffer* pWrite, uint64 hAsyncCall, uint32 cubCallback);
+        bool  (*handler)(CSteamPipeClient* pipe, CUtlBuffer* pWrite,
+                         uint64 hAsyncCall, uint32 cubCallback);
     };
 
     constexpr GacrDispatchEntry g_GacrDispatch[] = {
         { EncryptedAppTicketResponse_t::k_iCallback, HandleCallback_EncryptedAppTicketResponse },
+        { UserStatsReceived_t::k_iCallback, HandleCallback_UserStatsReceived },
+        { GlobalAchievementPercentagesReady_t::k_iCallback,
+          HandleCallback_GlobalAchievementPercentagesReady },
+        { GlobalStatsReceived_t::k_iCallback, HandleCallback_GlobalStatsReceived },
     };
 
     // ── Handler: IClientUtils::GetAPICallResult ──────────────────
     void Handler_IClientUtils_GetAPICallResult(
-        CSteamPipeClient*, CUtlBuffer* pRead, CUtlBuffer* pWrite)
+        CSteamPipeClient* pipe, CUtlBuffer* pRead, CUtlBuffer* pWrite)
     {
         if (pRead->m_Put < OFFSET_ARGS + sizeof(GetAPICallResultRequest)) return;
 
@@ -75,7 +121,7 @@ namespace {
                   req->hSteamAPICall, appId, req->iCallbackExpected, req->cubCallback);
         for (auto& entry : g_GacrDispatch) {
             if (entry.callbackId == req->iCallbackExpected) {
-                entry.handler(pWrite, req->hSteamAPICall, req->cubCallback);
+                entry.handler(pipe, pWrite, req->hSteamAPICall, req->cubCallback);
                 return;
             }
         }

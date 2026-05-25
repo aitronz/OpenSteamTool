@@ -36,6 +36,7 @@ namespace {
     // Assumes one game at a time.  Set by SpawnProcess VEH when -onlinefix
     // is detected; cleared when a non-onlinefix game launches.
     AppId_t   g_OnlineFixRealAppId;
+    HSteamPipe g_OnlineFixUserStatsPipe;
     void*     g_steamEngine;
     thread_local uint32 g_userStatsAppIdOverrideDepth;
 
@@ -78,11 +79,13 @@ namespace {
                 if (LuaConfig::HasDepot(appId) && cmdLine
                     && strstr(cmdLine, "-onlinefix")) {
                     g_OnlineFixRealAppId = appId;
+                    g_OnlineFixUserStatsPipe = 0;
                     *pGameID = kOnlineFixAppId;
                     LOG_MISC_INFO("SpawnProcess: appid {} -> {}, cmd=\"{}\"",
                                   appId, kOnlineFixAppId, cmdLine);
                 } else {
                     g_OnlineFixRealAppId = 0;
+                    g_OnlineFixUserStatsPipe = 0;
                 }
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
@@ -195,6 +198,7 @@ namespace Hooks_Misc {
 
         LOCATE_LIST(VEH_ZERO_RESOLVE)
         g_OnlineFixRealAppId = 0;
+        g_OnlineFixUserStatsPipe = 0;
         g_steamEngine = nullptr;
         g_userStatsAppIdOverrideDepth = 0;
         g_GameNameCache.clear();
@@ -219,13 +223,33 @@ namespace Hooks_Misc {
         return GetAppIDForCurrentPipe();
     }
 
-    void SetUserStatsContext(bool active)
+    void SetUserStatsContext(HSteamPipe hSteamPipe, bool active)
     {
         if (active) {
+            if (g_OnlineFixRealAppId)
+                g_OnlineFixUserStatsPipe = hSteamPipe;
             ++g_userStatsAppIdOverrideDepth;
         } else if (g_userStatsAppIdOverrideDepth) {
             --g_userStatsAppIdOverrideDepth;
         }
+    }
+
+    bool RewriteOnlineFixUserStatsCallback(HSteamPipe hSteamPipe, uint64& gameId)
+    {
+        constexpr uint64 appIdMask = 0xFFFFFF;
+        if (!g_OnlineFixRealAppId || hSteamPipe != g_OnlineFixUserStatsPipe
+            || static_cast<AppId_t>(gameId & appIdMask) != g_OnlineFixRealAppId) {
+            return false;
+        }
+
+        gameId = (gameId & ~appIdMask) | kOnlineFixAppId;
+        return true;
+    }
+
+    bool ShouldRouteOnlineFixUserStatsCallback(AppId_t routeAppId)
+    {
+        return g_OnlineFixRealAppId && g_OnlineFixUserStatsPipe
+            && routeAppId == g_OnlineFixRealAppId;
     }
 
     void EnsureBufferSize(CUtlBuffer* pWrite, int32 size)

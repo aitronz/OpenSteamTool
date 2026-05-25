@@ -143,6 +143,12 @@ inline const Signature SendCallbackToPipeSigs[] = {
     {"1779486452", "48 89 5C 24 ?? 57 48 83 EC ?? 41 8B D9 41 8B F8 E8 ?? ?? ?? ?? 48 8B C8"},  // stable
 };
 
+inline const Signature DispatchCallbackByAppIdSigs[] = {
+    {"1779155395", "4C 89 4C 24 20 44 89 44 24 18 41 54 41 55 41 56 48 83 EC 50"},  // beta
+    {"1778281814", "4C 89 4C 24 20 44 89 44 24 18 41 54 41 55 41 56 48 83 EC 50"},  // stable
+    {"1779486452", "4C 89 4C 24 20 44 89 44 24 18 41 54 41 55 41 56 48 83 EC 50"},  // stable
+};
+
 inline const Signature SpawnProcessSigs[] = {
     {"1778803745", "48 89 5C 24 18 4C 89 4C 24 20 48 89 54 24 10 55 56 57 41 54 41 55 41 56 41 57 48 8D"},  // beta
     {"1778281814", "48 89 5C 24 18 4C 89 4C 24 20 48 89 54 24 10 55 56 57 41 54 41 55 41 56 41 57 48 8D"},  // stable

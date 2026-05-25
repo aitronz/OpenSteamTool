@@ -3,6 +3,8 @@
 // ── ISteamUser callbacks (base = 100) ───────────────────────────────
 
 constexpr int k_iSteamUserCallbacks = 100;
+constexpr int k_iSteamUserStatsCallbacks = 1100;
+constexpr int k_cchStatNameMax = 128;
 
 //-----------------------------------------------------------------------------
 // Purpose: Result from RequestEncryptedAppTicket (async)
@@ -11,6 +13,66 @@ struct EncryptedAppTicketResponse_t
 {
 	enum { k_iCallback = k_iSteamUserCallbacks + 54 };
 
+	EResult m_eResult;
+};
+
+//-----------------------------------------------------------------------------
+// Purpose: User stats callbacks carry the app identity back to the game.
+//-----------------------------------------------------------------------------
+struct UserStatsReceived_t
+{
+	enum { k_iCallback = k_iSteamUserStatsCallbacks + 1 };
+
+	uint64  m_nGameID;
+	EResult m_eResult;
+	uint32  m_unPadding;
+	uint64  m_steamIDUser;
+};
+static_assert(sizeof(UserStatsReceived_t) == 0x18,
+              "UserStatsReceived_t must be 0x18 bytes");
+
+struct UserStatsStored_t
+{
+	enum { k_iCallback = k_iSteamUserStatsCallbacks + 2 };
+
+	uint64  m_nGameID;
+	EResult m_eResult;
+};
+
+struct UserAchievementStored_t
+{
+	enum { k_iCallback = k_iSteamUserStatsCallbacks + 3 };
+
+	uint64 m_nGameID;
+	bool   m_bGroupAchievement;
+	char   m_rgchAchievementName[k_cchStatNameMax];
+	uint32 m_nCurProgress;
+	uint32 m_nMaxProgress;
+};
+
+struct UserAchievementIconFetched_t
+{
+	enum { k_iCallback = k_iSteamUserStatsCallbacks + 9 };
+
+	uint64 m_nGameID;
+	char   m_rgchAchievementName[k_cchStatNameMax];
+	bool   m_bAchieved;
+	int32  m_nIconHandle;
+};
+
+struct GlobalAchievementPercentagesReady_t
+{
+	enum { k_iCallback = k_iSteamUserStatsCallbacks + 10 };
+
+	uint64  m_nGameID;
+	EResult m_eResult;
+};
+
+struct GlobalStatsReceived_t
+{
+	enum { k_iCallback = k_iSteamUserStatsCallbacks + 12 };
+
+	uint64  m_nGameID;
 	EResult m_eResult;
 };
 

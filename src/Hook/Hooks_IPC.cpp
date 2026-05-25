@@ -79,10 +79,10 @@ namespace {
 
         // ── Run original ────────────────────────────────────────
         if (userStatsCall)
-            Hooks_Misc::SetUserStatsContext(true);
+            Hooks_Misc::SetUserStatsContext(hSteamPipe, true);
         const bool result = oIPCProcessMessage(pServer, hSteamPipe, pRead, pWrite);
         if (userStatsCall)
-            Hooks_Misc::SetUserStatsContext(false);
+            Hooks_Misc::SetUserStatsContext(hSteamPipe, false);
         if (!result || !entry) return result;
 
         // Only run handlers for apps with configured depots.
