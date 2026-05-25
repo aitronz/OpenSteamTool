@@ -88,6 +88,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved)
     if (dwReason == DLL_PROCESS_ATTACH)
     {
         DisableThreadLibraryCalls(hModule);
+        // Keep this module pinned so explicit FreeLibrary cannot unload code
+        // while hooks and worker threads may still reference it.
+        HMODULE pinnedModule = nullptr;
+        GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            reinterpret_cast<LPCSTR>(&DllMain), &pinnedModule);
         // Hand off all real work to a worker thread to avoid running file I/O,
         // LoadLibrary, and detour transactions under the loader lock.
         HANDLE h = CreateThread(nullptr, 0, InitThread, hModule, 0, nullptr);
@@ -95,12 +101,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved)
     }
     else if (dwReason == DLL_PROCESS_DETACH)
     {
-        // DLL detach runs under loader lock. Never block here.
-        // For explicit FreeLibrary (pvReserved == nullptr), best-effort
-        // signal the watcher thread to exit and detach the std::thread object
-        // so module teardown does not hit std::thread destructor terminate.
-        if (pvReserved == nullptr) {
-            FileWatcher::StopNoJoin();
+        // During process termination, join watcher thread object so CRT static
+        // teardown does not hit std::thread's joinable-guard terminate.
+        if (pvReserved != nullptr) {
+            FileWatcher::Stop();
         }
     }
 
