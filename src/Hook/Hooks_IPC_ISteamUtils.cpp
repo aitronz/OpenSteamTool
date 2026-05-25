@@ -31,22 +31,6 @@ namespace {
         return true;
     }
 
-    // ── Handler: IClientUtils::GetAppID ──────────────────────────
-    //  SpawnProcess rewrites pGameID to 480 for OnlineFix games,
-    //  so steamclient returns 480.  Restore the real app_id.
-    void Handler_IClientUtils_GetAppID(
-        CSteamPipeClient* pipe, CUtlBuffer*, CUtlBuffer* pWrite)
-    {
-        AppId_t realAppId = Hooks_Misc::ResolveAppId();
-        if (!realAppId || pWrite->m_Put < 5) return;
-
-        AppId_t current = *reinterpret_cast<const AppId_t*>(pWrite->Base() + 1);
-        if (current == realAppId) return;
-
-        *reinterpret_cast<AppId_t*>(pWrite->Base() + 1) = realAppId;
-        LOG_IPC_INFO("GetAppID: spoof response {} -> {}", current, realAppId);
-    }
-
     // ════════════════════════════════════════════════════════════════
     //  GetAPICallResult per-callback handlers
     // ════════════════════════════════════════════════════════════════
@@ -98,7 +82,6 @@ namespace {
     }
 
     const Hooks_IPC::IpcHandlerEntry g_Entries[] = {
-        ADD_IPC_HANDLER(IClientUtils, GetAppID),
         ADD_IPC_HANDLER(IClientUtils, GetAPICallResult),
     };
 

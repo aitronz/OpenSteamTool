@@ -29,7 +29,6 @@ constexpr uint32 HASH_IClientUser_GetAppOwnershipTicketExtendedData = 0xC7E71245
 constexpr uint32 HASH_IClientUser_RequestEncryptedAppTicket         = 0x25D6BB1D;
 constexpr uint32 HASH_IClientUser_GetEncryptedAppTicket             = 0xE0468CB4;
 
-constexpr uint32 HASH_IClientUtils_GetAppID                         = 0x09607EC4;
 constexpr uint32 HASH_IClientUtils_GetAPICallResult                 = 0x2D3D3947;
 constexpr uint32 HASH_IClientUtils_SetAppIDForCurrentPipe           = 0x3378803C;
 
