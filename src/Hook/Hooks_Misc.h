@@ -4,7 +4,7 @@
 
 // Catch-all for the lightweight info-capture int3 traps that don't fit a
 // dedicated category — currently:
-//   * GetAppIDForCurrentPipe  -> captures the SteamEngine pointer
+//   * GetAppIDForCurrentPipe  -> detoured for scoped OnlineFix stats identity
 //   * SpawnProcess            -> OnlineFix detection + 480 rewrite
 //   * GetAppDataFromAppInfo   -> captures the CAppInfoCache pointer
 //   * MarkLicenseAsChanged    -> captures pCUser; resolved for NotifyLicenseChanged
@@ -26,6 +26,9 @@ namespace Hooks_Misc {
     // Resolve the real appid: if OnlineFix is active return real appid,
     // otherwise fall back to GetAppIDForCurrentPipe().
     AppId_t ResolveAppId();
+
+    // Select real app identity while forwarding OnlineFix user-stats calls.
+    void SetUserStatsContext(bool active);
 
     // Get localized game name via GetAppDataFromAppInfo (cached).
     std::string GetGameNameByAppID(AppId_t appId);

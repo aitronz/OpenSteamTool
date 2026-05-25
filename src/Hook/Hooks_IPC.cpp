@@ -40,6 +40,7 @@ namespace {
 
         // ── Parse header, find handler ──────────────────────────
         const IpcHandlerEntry* entry = nullptr;
+        bool userStatsCall = false;
 
         if (pRead->TellPut() >= IPC_HEADER_SIZE) {
             const uint8* data = pRead->Base();
@@ -55,6 +56,7 @@ namespace {
                 }
                 const auto iface = static_cast<EIPCInterface>(data[OFFSET_INTERFACE_ID]);
                 const uint32 funcHash = *reinterpret_cast<const uint32*>(data + OFFSET_FUNC_HASH);
+                userStatsCall = iface == EIPCInterface::IClientUserStats;
                 entry = FindHandler(iface, funcHash);
                 if (entry) {
                     LOG_IPC_DEBUG("[InterfaceCall] {} {} realAppId={},AppId={}",
@@ -76,7 +78,11 @@ namespace {
         }
 
         // ── Run original ────────────────────────────────────────
+        if (userStatsCall)
+            Hooks_Misc::SetUserStatsContext(true);
         const bool result = oIPCProcessMessage(pServer, hSteamPipe, pRead, pWrite);
+        if (userStatsCall)
+            Hooks_Misc::SetUserStatsContext(false);
         if (!result || !entry) return result;
 
         // Only run handlers for apps with configured depots.

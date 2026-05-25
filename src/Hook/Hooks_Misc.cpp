@@ -9,7 +9,6 @@ namespace {
     using CUtlBufferEnsureCapacity_t     = void*(*)(CUtlBuffer*, int);
     using CUtlMemoryGrow_t               = void*(*)(CUtlVector<AppId_t>*, int);
     using GetAppDataFromAppInfo_t        = int64(*)(void*, AppId_t, const char*, uint8*, int32);
-    using GetAppIDForCurrentPipe_t       = AppId_t(*)(void*);
     using GetPackageInfo_t               = PackageInfo*(*)(void*, uint32, int64);
     using MarkLicenseAsChanged_t         = int64(*)(void*, uint32, bool);
     using ProcessPendingLicenseUpdates_t = bool(*)(void*);
@@ -17,7 +16,6 @@ namespace {
     // ── X-macro lists ────────────────────────────────────────────────────────
     // One-shot int3: on hit, ctx->Rcx stored to the named output variable.
     #define CAPTURE_LIST(X)                          \
-        X(GetAppIDForCurrentPipe, g_steamEngine)     \
         X(GetAppDataFromAppInfo,  g_pCAppInfoCache)  \
         X(MarkLicenseAsChanged,   g_pCUser)          \
         X(GetPackageInfo,         g_pCPackageInfo)
@@ -38,6 +36,8 @@ namespace {
     // Assumes one game at a time.  Set by SpawnProcess VEH when -onlinefix
     // is detected; cleared when a non-onlinefix game launches.
     AppId_t   g_OnlineFixRealAppId;
+    void*     g_steamEngine;
+    thread_local uint32 g_userStatsAppIdOverrideDepth;
 
     std::unordered_map<AppId_t, std::string> g_GameNameCache;
 
@@ -99,6 +99,20 @@ namespace {
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
+    // ── GetAppIDForCurrentPipe ───────────────────────────────────────────────
+    HOOK_FUNC(GetAppIDForCurrentPipe, AppId_t, void* pEngine)
+    {
+        g_steamEngine = pEngine;
+        const AppId_t appId = oGetAppIDForCurrentPipe(pEngine);
+        if (g_userStatsAppIdOverrideDepth && g_OnlineFixRealAppId
+            && appId == kOnlineFixAppId) {
+            LOG_MISC_TRACE("GetAppIDForCurrentPipe: user-stats OnlineFix AppId={} -> {}",
+                           appId, g_OnlineFixRealAppId);
+            return g_OnlineFixRealAppId;
+        }
+        return appId;
+    }
+
     // ── SteamController_OptedInMask ──────────────────────────────────────────
     // Called by CUser_BuildSpawnEnvBlock with pGameID's appid to
     // compute EnableConfiguratorSupport and the SDL_* env vars.
@@ -155,6 +169,7 @@ namespace Hooks_Misc {
             g_vehHandle = AddVectoredExceptionHandler(1, VehHandler);
 
         HOOK_BEGIN();
+        INSTALL_HOOK_D(GetAppIDForCurrentPipe);
         INSTALL_HOOK_D(BuildSpawnEnvBlock);
         INSTALL_HOOK_D(OptedInMask);
         HOOK_END();
@@ -162,6 +177,7 @@ namespace Hooks_Misc {
 
     void Uninstall() {
         UNHOOK_BEGIN();
+        UNINSTALL_HOOK(GetAppIDForCurrentPipe);
         UNINSTALL_HOOK(BuildSpawnEnvBlock);
         UNINSTALL_HOOK(OptedInMask);
         UNHOOK_END();
@@ -179,6 +195,8 @@ namespace Hooks_Misc {
 
         LOCATE_LIST(VEH_ZERO_RESOLVE)
         g_OnlineFixRealAppId = 0;
+        g_steamEngine = nullptr;
+        g_userStatsAppIdOverrideDepth = 0;
         g_GameNameCache.clear();
     }
 
@@ -199,6 +217,15 @@ namespace Hooks_Misc {
     AppId_t ResolveAppId() {
         if (g_OnlineFixRealAppId) return g_OnlineFixRealAppId;
         return GetAppIDForCurrentPipe();
+    }
+
+    void SetUserStatsContext(bool active)
+    {
+        if (active) {
+            ++g_userStatsAppIdOverrideDepth;
+        } else if (g_userStatsAppIdOverrideDepth) {
+            --g_userStatsAppIdOverrideDepth;
+        }
     }
 
     void EnsureBufferSize(CUtlBuffer* pWrite, int32 size)
