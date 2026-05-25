@@ -95,9 +95,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved)
     }
     else if (dwReason == DLL_PROCESS_DETACH)
     {
-        // DllMain runs under loader lock. Blocking joins or Detours transactions
-        // here can deadlock the process during shutdown/unload.
-        (void)pvReserved;
+        // DLL detach runs under loader lock. Never block here.
+        // For explicit FreeLibrary (pvReserved == nullptr), best-effort
+        // signal the watcher thread to exit and detach the std::thread object
+        // so module teardown does not hit std::thread destructor terminate.
+        if (pvReserved == nullptr) {
+            FileWatcher::StopNoJoin();
+        }
     }
 
     return TRUE;

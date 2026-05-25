@@ -214,4 +214,11 @@ namespace FileWatcher {
             g_watcherThread.join();
         }
     }
+
+    void StopNoJoin() {
+        g_running = false;
+        if (g_watcherThread.joinable()) {
+            g_watcherThread.detach();
+        }
+    }
 }
