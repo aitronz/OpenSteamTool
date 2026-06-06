@@ -22,6 +22,7 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 # Dependency recipes (FetchContent-backed, cached at <repo>/.deps).
 # ---------------------------------------------------------------------------
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+set(OPENSTEAMTOOL_TOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../tools")
 include(Lua)
 include(Detours)
 include(Spdlog)
@@ -29,43 +30,46 @@ include(Protobuf)
 include(Tomlplusplus)
 include(LogMacros)
 
+# Build the host code generators (ipc_codegen) in their own binary subtree so
+# their executables never land in the shipped output directory. EXCLUDE_FROM_ALL
+# means only the tools actually depended on (ipc_codegen) get built here.
+add_subdirectory("${OPENSTEAMTOOL_TOOLS_DIR}" "${CMAKE_BINARY_DIR}/tools" EXCLUDE_FROM_ALL)
+include("${OPENSTEAMTOOL_TOOLS_DIR}/cmake/IPCCodegen.cmake")
+
+set(IPC_IDL "${CMAKE_CURRENT_SOURCE_DIR}/Steam/IPCMessages.steamd")
+# Per-config output dir, mirroring the protobuf recipe below: a Multi-Config
+# build invokes the generator once per config, and a single shared output file
+# would ping-pong between the Release/Debug graphs and force needless rebuilds.
+opensteamtool_add_ipc_codegen(IPC_GEN
+    IDL "${IPC_IDL}"
+    CPP_OUT "${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>"
+)
+
 # ---------------------------------------------------------------------------
-# Protobuf code generation — two variants from the same .proto:
+# Protobuf code generation — one variant per config, from the same .proto:
 #
-#   Debug  → full Message  (protoc --cpp_out)         → links libprotobuf
-#   Release → lite MessageLite (protoc --cpp_out=lite) → links libprotobuf-lite
+#   Debug   → full Message     (protoc --cpp_out)       → links libprotobuf
+#   Release → lite MessageLite (protoc --cpp_out=lite:) → links libprotobuf-lite
 #
-# Both land in separate subdirectories of the build tree so the source
-# directory stays clean and the right set is picked per configuration.
+# Output lands in the per-config generated/ dir (same root as the IPC header),
+# so each config owns its own files. A shared output path would ping-pong
+# between the Release/Debug graphs (the command embeds the config-specific
+# protoc path) and force a regen + recompile on every config switch.
 # ---------------------------------------------------------------------------
 set(PROTO_SRC "${CMAKE_CURRENT_SOURCE_DIR}/proto/steam_messages.proto")
-set(PROTO_GEN_DIR       "${CMAKE_CURRENT_BINARY_DIR}/proto")
-set(PROTO_GEN_LITE_DIR  "${CMAKE_CURRENT_BINARY_DIR}/proto_lite")
+set(PROTO_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>")
 
-# Full Message (Debug)
 add_custom_command(
     OUTPUT "${PROTO_GEN_DIR}/steam_messages.pb.cc"
            "${PROTO_GEN_DIR}/steam_messages.pb.h"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${PROTO_GEN_DIR}"
     COMMAND $<TARGET_FILE:protoc>
-        "--cpp_out=${PROTO_GEN_DIR}"
+        "--cpp_out=$<$<CONFIG:Release>:lite:>${PROTO_GEN_DIR}"
         "-I${CMAKE_CURRENT_SOURCE_DIR}/proto"
         "${PROTO_SRC}"
     DEPENDS "${PROTO_SRC}" protoc
-    COMMENT "Generating protobuf full-Message sources (Debug)"
-)
-
-# Lite MessageLite (Release)
-add_custom_command(
-    OUTPUT "${PROTO_GEN_LITE_DIR}/steam_messages.pb.cc"
-           "${PROTO_GEN_LITE_DIR}/steam_messages.pb.h"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${PROTO_GEN_LITE_DIR}"
-    COMMAND $<TARGET_FILE:protoc>
-        "--cpp_out=lite:${PROTO_GEN_LITE_DIR}"
-        "-I${CMAKE_CURRENT_SOURCE_DIR}/proto"
-        "${PROTO_SRC}"
-    DEPENDS "${PROTO_SRC}" protoc
-    COMMENT "Generating protobuf lite-MessageLite sources (Release)"
+    COMMENT "Generating protobuf C++ sources"
+    VERBATIM
 )
 
 # ---------------------------------------------------------------------------
@@ -84,9 +88,17 @@ add_library(OpenSteamTool SHARED
     Utils/VehCommon.cpp
     Utils/WinHttp.cpp
     Utils/FileWatcher.cpp
+    Utils/ManifestClient.cpp
+    Utils/RemoteToml.cpp
+    Utils/IPCLoader.cpp
+    Utils/SteamDiagnostics.cpp
+
+    # Generated IPC message structs (depends on IPCMessages.steamd via add_custom_command)
+    "${IPC_GEN}"
 
     # Per-category hook modules
     Hook/HookManager.cpp
+    Hook/Hooks_CallBack.cpp
     Hook/Hooks_Decryption.cpp
     Hook/Hooks_IPC.cpp
     Hook/Hooks_IPC_ISteamUser.cpp
@@ -95,20 +107,19 @@ add_library(OpenSteamTool SHARED
     Hook/Hooks_Manifest.cpp
     Hook/Hooks_Misc.cpp
     Hook/Hooks_NetPacket.cpp
+    Hook/PendingAPICalls.cpp
     Hook/Hooks_SteamUI.cpp
     Hook/Hooks_Package.cpp
 
-    # protobuf generated sources — per-config variant
-    $<$<CONFIG:Debug>:${PROTO_GEN_DIR}/steam_messages.pb.cc>
-    $<$<CONFIG:Release>:${PROTO_GEN_LITE_DIR}/steam_messages.pb.cc>
+    # protobuf generated sources (full in Debug, lite in Release)
+    "${PROTO_GEN_DIR}/steam_messages.pb.cc"
 )
 
 # Header search path — per-config include directory
 target_include_directories(OpenSteamTool PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}/generated
-    $<$<CONFIG:Debug>:${PROTO_GEN_DIR}>
-    $<$<CONFIG:Release>:${PROTO_GEN_LITE_DIR}>
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>
 )
 
 target_link_libraries(OpenSteamTool PRIVATE

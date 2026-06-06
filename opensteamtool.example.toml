@@ -9,8 +9,9 @@ level = "info"
 
 [manifest]
 # Which upstream API to query for depot manifest request codes.
-#   "steamrun"  → https://manifest.steam.run/api/manifest/{gid}
-#   "wudrm"     → http://gmrc.wudrm.com/manifest/{gid}
+#   "opensteamtool" → https://manifest.opensteamtool.com/{gid}   (default)
+#   "wudrm"         → http://gmrc.wudrm.com/manifest/{gid} (recommended for China users)
+#   "steamrun"      → https://manifest.steam.run/api/manifest/{gid}
 # If <Steam>/config/lua/manifest.lua defines fetch_manifest_code(gid) or
 # fetch_manifest_code_ex(app_id, depot_id, gid), those Lua functions take
 # priority over the url setting below.
@@ -43,7 +44,7 @@ level = "info"
 #     end
 #     return nil
 # end
-url = "steamrun"
+url = "opensteamtool"
 
 # HTTP timeouts for manifest requests (milliseconds).
 # timeout_resolve_ms  — DNS resolution        (default: 5000)
@@ -64,48 +65,10 @@ timeout_recv_ms    = 10000
 [lua]
 # paths = []
 
-[pattern]
-# Mirror base URL for the per-DLL signature TOML files.
-# At runtime, OpenSteamTool appends "/steamclient/<sha256>.toml" and
-# "/steamui/<sha256>.toml" to whatever you set here.
+[remote]
+# Optional metadata mirror. Leave unset to use GitHub with jsDelivr fallback.
+# A custom mirror replaces the built-in remote sources and must include all
+# three placeholders: {channel}, {component}, and {sha256}.
 #
-# Default behaviour (this key commented out / empty) — every launch:
-#   1. Try https://raw.githubusercontent.com/OpenSteam001/steam-monitor/pattern
-#   2. On connection failure, automatically fall back to
-#      https://cdn.jsdelivr.net/gh/OpenSteam001/steam-monitor@pattern
-#   3. On total remote failure, fall back to <Steam>/opensteamtool/pattern/
-#      (the local cache, written after each successful remote fetch).
-#
-# Remote is consulted every launch so the upstream bot can re-publish a TOML
-# (adding new signatures or fixing existing ones) and users pick it up
-# automatically without clearing any cache.
-#
-# Most users — including users behind GFW where raw.githubusercontent.com
-# is blocked but jsDelivr is reachable — do NOT need to set anything here.
-#
-# Setting `mirror` below DISABLES the automatic GitHub→jsDelivr fallback:
-# only the URL you specify is tried (an explicit user choice wins).  Local
-# cache fallback still applies.  Use this if you have a private mirror, an
-# intranet server, or want a CDN that's faster than both defaults on your
-# network.  Verify your chosen mirror by
-# opening the FULL URL (mirror + subdir + a real sha256 + ".toml") in a
-# browser — pasting just the mirror base will usually show "Invalid URL"
-# from CDNs, that's expected.
-#
-# Example full URL to verify in a browser (replace <sha> with one from
-# https://github.com/OpenSteam001/steam-monitor/tree/pattern/steamui):
-#   https://cdn.jsdelivr.net/gh/OpenSteam001/steam-monitor@pattern/steamui/<sha>.toml
-#
-# Common mirrors:
-#
-#   # jsDelivr (global CDN, generally reachable from mainland China)
-#   mirror = "https://cdn.jsdelivr.net/gh/OpenSteam001/steam-monitor@pattern"
-#
-#   # ghproxy (community proxy — availability varies, use at your own risk)
-#   mirror = "https://ghproxy.com/https://raw.githubusercontent.com/OpenSteam001/steam-monitor/pattern"
-#
-#   # Self-hosted: any HTTPS server that serves the same directory layout
-#   mirror = "https://your.server.com/opensteamtool-patterns"
-#
-# A trailing "/" is allowed but optional; OpenSteamTool strips it.
-# mirror = ""
+# url_template = "https://your.server/{channel}/{component}/{sha256}.toml"
+# url_template = "https://fast.jsdelivr.net/gh/OpenSteam001/steam-monitor@{channel}/{component}/{sha256}.toml"

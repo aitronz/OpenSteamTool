@@ -17,7 +17,6 @@ struct EncryptedAppTicketResponse_t
 //-----------------------------------------------------------------------------
 // Purpose: Broadcast when app licenses change (additions / removals / reload).
 //          Sent by CClientAppManager after ProcessPendingLicenseUpdates.
-//          Size: 0x118 (280 bytes).
 //-----------------------------------------------------------------------------
 struct AppLicensesChanged_t
 {
@@ -30,5 +29,3 @@ struct AppLicensesChanged_t
 	AppId_t   m_rgAppsUpdated[64];         // 0x0C  — batch of updated AppIds
 	uint64    m_unAppsAdded;               // 0x110 — bitmask: bit N = m_rgAppsUpdated[N] was added
 };
-static_assert(sizeof(AppLicensesChanged_t) == 0x118,
-              "AppLicensesChanged_t must be 0x118 bytes");

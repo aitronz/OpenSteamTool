@@ -1,93 +1,112 @@
+#include "dllmain.h"
 #include "Hooks_IPC.h"
 #include "Hooks_IPC_ISteamUser.h"
 #include "Hooks_IPC_ISteamUtils.h"
 #include "HookMacros.h"
-#include "dllmain.h"
-#include "Utils/Hash.h"
 #include "Hooks_Misc.h"
+#include "Utils/Hash.h"
+#include "Utils/IPCLoader.h"
 
 namespace {
 
-    using GetPipeClient_t = CSteamPipeClient*(*)(void* pEngine, HSteamPipe hSteamPipe);
-    GetPipeClient_t oGetPipeClient = nullptr;
+    RESOLVE_FUNC(GetPipeClient, CPipeClient*, void* pEngine, HSteamPipe hSteamPipe);
 
-    static CSteamPipeClient* GetPipe(void* pServer, HSteamPipe hSteamPipe) {
+    static CPipeClient* GetPipe(void* pServer, HSteamPipe hSteamPipe) {
         return oGetPipeClient ? oGetPipeClient(pServer, hSteamPipe) : nullptr;
     }
 
-    // ════════════════════════════════════════════════════════════════
-    //  Handler registry
-    // ════════════════════════════════════════════════════════════════
-    using namespace Hooks_IPC;
+    //  Handler dispatch table
+    struct ResolvedHandler {
+        EIPCInterface         interfaceID;
+        uint32                funcHash;
+        std::string           name;       // "IClientUser::GetSteamID" — for logs
+        uint32                fencepost;
+        uint32                argc;
+        IPCHandlerFn          pre;
+        IPCHandlerFn          post;
 
-    std::vector<IpcHandlerEntry> g_Handlers;
+        ResolvedHandler(const IPCHandlerEntry& entry, const IPCLoader::Method& method)
+            : interfaceID(method.interfaceID),
+              funcHash(method.funcHash),
+              name(std::string(entry.interfaceName) + "::" + entry.methodName),
+              fencepost(method.fencepost),
+              argc(method.argc),
+              pre(entry.pre),
+              post(entry.post) {}
 
-    static const IpcHandlerEntry* FindHandler(EIPCInterface iface, uint32 funcHash) {
+        std::string DebugString() const {
+            return std::format("{} -> hash=0x{:08X} fencepost=0x{:08X} argc={}",
+                name, funcHash, fencepost, argc);
+        }
+    };
+    std::vector<ResolvedHandler> g_Handlers;
+
+    static ResolvedHandler* FindHandler(EIPCInterface iface, uint32 funcHash) {
         for (auto& e : g_Handlers) {
             if (e.interfaceID == iface && e.funcHash == funcHash) return &e;
         }
         return nullptr;
     }
 
-    // ════════════════════════════════════════════════════════════════
-    //  Main hook
-    // ════════════════════════════════════════════════════════════════
-    HOOK_FUNC(IPCProcessMessage, bool,
-              void* pServer, HSteamPipe hSteamPipe,
+    struct IPCDispatch {
+        CPipeClient*     pipe = nullptr;
+        ResolvedHandler* handler = nullptr;
+
+        bool enabled() const {
+            return pipe && handler;
+        }
+
+        std::string DebugString() const {
+            return std::format("{} {}",pipe ? pipe->DebugString() : "null",
+                                handler ? handler->DebugString() : "null");
+        }
+    };
+
+    static IPCDispatch ResolveDispatch(void* pServer,HSteamPipe hSteamPipe,CUtlBuffer* pRead)
+    {
+        IPCDispatch dispatch{};
+        dispatch.pipe = GetPipe(pServer, hSteamPipe);
+        if (!dispatch.pipe) return dispatch;
+
+        // We only care about InterfaceCall messages
+        IPCMessages::IPCRequest request{pRead};
+        if (!request.ok()) return dispatch;
+        if (request.command() != EIPCCommand::InterfaceCall) return dispatch;
+
+        // Ignore calls when appId is not resolved or not in Lua config
+        if (!LuaConfig::HasDepot(Hooks_Misc::ResolveAppId())) return dispatch;
+
+        // Parse out the interface call header to find the handler
+        IPCMessages::IPCInterfaceCall call{request.body()};
+        if (!call.ok()) return dispatch;
+
+        // Lookup handler by interface ID + method hash
+        dispatch.handler = FindHandler(call.interfaceID(), call.funcHash());
+        if (!dispatch.handler) return dispatch;
+
+        LOG_IPC_DEBUG("Resolved IPC handler: {}", dispatch.DebugString());
+        return dispatch;
+    }
+
+    HOOK_FUNC(IPCProcessMessage, bool,void* pServer, HSteamPipe hSteamPipe,
               CUtlBuffer* pRead, CUtlBuffer* pWrite)
     {
-        auto* pipe = GetPipe(pServer, hSteamPipe);
+        const IPCDispatch dispatch = ResolveDispatch(pServer, hSteamPipe, pRead);
+        // If we didn't find a handler for this message, just pass through to the original function.
+        if(!dispatch.enabled())
+            return oIPCProcessMessage(pServer, hSteamPipe, pRead, pWrite);
 
-        // ── Parse header, find handler ──────────────────────────
-        const IpcHandlerEntry* entry = nullptr;
+        // If we did find a handler, run the pre-handler
+        if (dispatch.handler->pre)
+            dispatch.handler->pre(dispatch.pipe, pRead, pWrite);
 
-        if (pRead->TellPut() >= IPC_HEADER_SIZE) {
-            const uint8* data = pRead->Base();
-            const auto cmd = static_cast<EIPCCommand>(data[OFFSET_CMD]);
+        // Then call the original function to let steamclient process the message as normal.
+        bool result = oIPCProcessMessage(pServer, hSteamPipe, pRead, pWrite);
 
-            if (cmd == EIPCCommand::Handshake) {
-                LOG_IPC_INFO("[Handshake]: {}", pipe->DebugString());
-            } else if (cmd == EIPCCommand::InterfaceCall) {
-                // exclude InterfaceCall from steam
-                if ((pipe->m_hSteamPipe & 0xFFFF) <= 2) {
-                    LOG_IPC_TRACE("[InterfaceCall] from steam, pipe=0x{:08X} skip handler", pipe->m_hSteamPipe);
-                    return oIPCProcessMessage(pServer, hSteamPipe, pRead, pWrite);
-                }
-                const auto iface = static_cast<EIPCInterface>(data[OFFSET_INTERFACE_ID]);
-                const uint32 funcHash = *reinterpret_cast<const uint32*>(data + OFFSET_FUNC_HASH);
-                entry = FindHandler(iface, funcHash);
-                if (entry) {
-                    LOG_IPC_DEBUG("[InterfaceCall] {} {} realAppId={},AppId={}",
-                                  entry->name, pipe->DebugString(),
-                                  Hooks_Misc::ResolveAppId(),
-                                  Hooks_Misc::GetAppIDForCurrentPipe()
-                                );
-                } else {
-                    LOG_IPC_TRACE("[InterfaceCall(unhandled)]{}::0x{:08X} {} realAppId={},AppId={}",
-                                  EIPCInterfaceName(iface), funcHash,
-                                  pipe->DebugString(),
-                                  Hooks_Misc::ResolveAppId(),
-                                  Hooks_Misc::GetAppIDForCurrentPipe()
-                                );
-                }
-            } else {
-                LOG_IPC_TRACE("[{}] {}", EIPCCommandName(cmd), pipe->DebugString());
-            }
-        }
+        // Ultimately the post-handler can choose to modify the response.
+        if (result && dispatch.handler->post)
+            dispatch.handler->post(dispatch.pipe, pRead, pWrite);
 
-        // ── Run original ────────────────────────────────────────
-        const bool result = oIPCProcessMessage(pServer, hSteamPipe, pRead, pWrite);
-        if (!result || !entry) return result;
-
-        // Only run handlers for apps with configured depots.
-        AppId_t appId = Hooks_Misc::ResolveAppId();
-        if (!LuaConfig::HasDepot(appId)) {
-            LOG_IPC_TRACE("{}: appId={} has no configured depot, skip handler {}",
-                entry->name, appId, pipe->DebugString());
-            return result;
-        }
-
-        entry->handler(pipe, pRead, pWrite);
         return result;
     }
 
@@ -96,28 +115,37 @@ namespace {
 
 namespace Hooks_IPC {
 
-    void RegisterHandlers(const IpcHandlerEntry* entries, size_t count) {
-        g_Handlers.insert(g_Handlers.end(), entries, entries + count);
-    }
-
     void Install() {
-        RESOLVE_D(GetPipeClient);
+        RESOLVE_C(GetPipeClient);
 
-        // Interface modules register their handlers here.
+        // Each module registers a static array. Hash lookup against the
+        // IPCLoader metadata happens inside RegisterHandlers.
         Hooks_IPC_ISteamUser::Register();
         Hooks_IPC_ISteamUtils::Register();
 
+        LOG_IPC_INFO("Hooks_IPC: {} handlers registered", g_Handlers.size());
+
         HOOK_BEGIN();
-        INSTALL_HOOK_D(IPCProcessMessage);
+        INSTALL_HOOK_C(IPCProcessMessage);
         HOOK_END();
     }
 
     void Uninstall() {
         UNHOOK_BEGIN();
-        UNINSTALL_HOOK(IPCProcessMessage);
+        UNINSTALL_HOOK_C(IPCProcessMessage);
         UNHOOK_END();
-        oGetPipeClient = nullptr;
-        g_Handlers.clear();
+    }
+
+    void RegisterHandlers(std::span<const IPCHandlerEntry> entries) {
+        for (const auto& e : entries) {
+            const auto* m = IPCLoader::Find(e.interfaceName, e.methodName);
+            if (!m) {
+                LOG_IPC_WARN("[Handler Disabled] no IPC spec for {}",e.DebugString());
+                continue;
+            }
+            auto& handler = g_Handlers.emplace_back(e,*m);
+            LOG_IPC_DEBUG("Hooks_IPC: resolved {}", handler.DebugString());
+        }
     }
 
 }

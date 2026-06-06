@@ -1,5 +1,6 @@
 #include "Config.h"
 #include "Log.h"
+#include "ManifestClient.h"
 #include <toml++/toml.hpp>
 #include <filesystem>
 
@@ -20,8 +21,8 @@ namespace Config {
             // [manifest]
             if (auto manifest = tbl["manifest"].as_table()) {
                 if (auto val = (*manifest)["url"].value<std::string>()) {
-                    if (*val == "wudrm")
-                        manifestUrl = ManifestUrl::Wudrm;
+                    if (!ManifestClient::SetProvider(*val))
+                        LOG_WARN("Unknown manifest.url \"{}\", keeping default", *val);
                 }
                 if (auto val = (*manifest)["timeout_resolve_ms"].value<int64_t>())
                     manifestTimeoutResolve = static_cast<DWORD>(*val);
@@ -55,19 +56,15 @@ namespace Config {
                 }
             }
 
-            // [pattern]
-            if (auto pattern = tbl["pattern"].as_table()) {
-                if (auto val = (*pattern)["mirror"].value<std::string>()) {
-                    patternMirror = *val;
-                    // Strip a trailing slash so PatternLoader can append
-                    // "/<subdir>/<sha>.toml" without producing "//".
-                    while (!patternMirror.empty() && patternMirror.back() == '/')
-                        patternMirror.pop_back();
+            // [remote]
+            if (auto remote = tbl["remote"].as_table()) {
+                if (auto val = (*remote)["url_template"].value<std::string>()) {
+                    remoteUrlTemplate = *val;
                 }
             }
 
-            LOG_INFO("Config loaded: manifest.url={} log.level={} lua.paths={} pattern.mirror={}",
-                     manifestUrl == ManifestUrl::Wudrm ? "wudrm" : "steamrun",
+            LOG_INFO("Config loaded: manifest.url={} log.level={} lua.paths={} remote.url_template={}",
+                     ManifestClient::ActiveProviderName(),
                      [&](){
                          switch (logLevel) {
                          case LogLevel::Trace: return "trace";
@@ -79,7 +76,7 @@ namespace Config {
                          }
                      }(),
                      (uint32_t)luaPaths.size(),
-                     patternMirror.empty() ? "<default>" : patternMirror);
+                     remoteUrlTemplate.empty() ? "<default>" : remoteUrlTemplate);
 
         } catch (const toml::parse_error& e) {
             LOG_WARN("Config parse error: {}", e.what());

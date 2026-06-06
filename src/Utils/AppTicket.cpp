@@ -1,8 +1,10 @@
 #include "AppTicket.h"
+#include "Hook/Hooks_Decryption.h"
 
 #include <cstdlib>
 
 namespace AppTicket {
+    constexpr AppId_t kLocalAppTicketSourceAppId = 7;
 
     static uint64_t GetSteamIDFromRegistryString(AppId_t appId) {
         HKEY hKey;
@@ -75,6 +77,54 @@ namespace AppTicket {
         value.resize(valueSize);
         LOG_INFO("Successfully retrieved App Ownership Ticket from Registry, AppId: {}, Ticket Size: {}", appId, valueSize);
         return value;
+    }
+
+    // Exploit steamdrmp's off-by-four ticket parsing vulnerability:
+    static std::vector<uint8_t> ForgeLocalAppOwnershipTicket(AppId_t appId) {
+        std::vector<uint8_t> source = Hooks_Decryption::GetCacheAppOwnershipTicket(kLocalAppTicketSourceAppId);
+        if (source.size() <= kAppTicketSignatureSize) {
+            LOG_DEBUG("ForgeLocalAppOwnershipTicket for AppId {}: no source appticket", appId);
+            return {};
+        }
+
+        const size_t signedSize = source.size() - kAppTicketSignatureSize;
+        std::vector<uint8_t> ticket;
+        ticket.reserve(source.size() + sizeof(AppId_t));
+        ticket.insert(ticket.end(), source.begin(), source.begin() + signedSize);
+
+        const uint8_t* appIdBytes = reinterpret_cast<const uint8_t*>(&appId);
+        ticket.insert(ticket.end(), appIdBytes, appIdBytes + sizeof(AppId_t));
+        ticket.insert(ticket.end(), source.begin() + signedSize, source.end());
+
+        LOG_INFO("Forged App Ownership Ticket, AppId: {}, SourceAppId: {}, Physical Size: {}, Total Size: {}",
+                 appId, kLocalAppTicketSourceAppId, ticket.size(), source.size());
+        return ticket;
+    }
+
+    bool GetAppOwnershipTicket(AppId_t appId, AppOwnershipTicket& ticket) {
+        ticket = {};
+        
+        ticket.data = GetAppOwnershipTicketFromRegistry(appId);
+        if (!ticket.data.empty() && ticket.data.size() >= sizeof(uint32)) {
+            ticket.totalSize = static_cast<uint32>(ticket.data.size());
+            ticket.appIdOffset = kAppTicketAppIdOffset;
+            ticket.steamIdOffset = kAppTicketSteamIdOffset;
+            ticket.signatureOffset = *reinterpret_cast<const uint32*>(ticket.data.data());
+            ticket.signatureSize = kAppTicketSignatureSize;
+            return true;
+        }
+
+        ticket.data = ForgeLocalAppOwnershipTicket(appId);
+        if (ticket.data.empty()) {
+            return false;
+        }
+
+        ticket.totalSize = static_cast<uint32>(ticket.data.size() - sizeof(AppId_t));
+        ticket.appIdOffset = ticket.totalSize - kAppTicketSignatureSize;
+        ticket.steamIdOffset = kAppTicketSteamIdOffset;
+        ticket.signatureOffset = ticket.appIdOffset + sizeof(AppId_t);
+        ticket.signatureSize = kAppTicketSignatureSize;
+        return true;
     }
 
     std::vector<uint8_t> GetEncryptedTicketFromRegistry(AppId_t appId) {

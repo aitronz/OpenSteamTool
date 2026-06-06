@@ -34,6 +34,12 @@ for %%C in (%CONFIGS%) do (
     echo [INFO] Building: %%C
     cmake --build build --config %%C
     if errorlevel 1 goto :fail
+
+    REM extract_tickets is EXCLUDE_FROM_ALL, so build it explicitly. It lands in
+    REM build\tools\%%C\ rather than the shipped output directory.
+    echo [INFO] Building tool extract_tickets for %%C
+    cmake --build build --config %%C --target extract_tickets
+    if errorlevel 1 goto :fail
 )
 
 echo [OK] Build completed successfully.
