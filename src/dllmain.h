@@ -23,8 +23,9 @@
 #include "Utils/Config.h"
 
 
-inline HMODULE diversion_hMdoule = nullptr;
-inline std::atomic<bool> g_HooksInstalled{false};
+inline HMODULE client_hModule = nullptr;
+inline HMODULE ui_hModule = nullptr;
+
 inline char SteamInstallPath[MAX_PATH] = {};
 inline char SteamclientPath[MAX_PATH] = {};
 inline char SteamUIPath[MAX_PATH]      = {};

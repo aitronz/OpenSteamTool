@@ -7,8 +7,10 @@
 #include "Types.h"
 #include "Enums.h"
 
+
 #include <string>
 #include <format>
+#include <ostream>
 
 template<typename T>
 struct CUtlMemory{
@@ -59,6 +61,10 @@ struct CUtlBuffer{
 	const uint8* Base() const { return m_Memory.m_pMemory; }
 	int32 TellPut() const     { return m_Put; }
 	int32 TellGet() const     { return m_Get; }
+
+	uint32 Size() const        { return m_Memory.m_nAllocationCount; }
+	uint32 Capacity() const    { return m_Memory.m_nAllocationCount; }
+
 	// Debug helper
 	std::string DebugString() const{
       return std::format("m_Memory:0x{:X} m_AllocCnt:{} m_Grow:{} m_Get:{} m_Put:{} m_nOffset:{} m_flags:{}",
@@ -113,23 +119,6 @@ struct AppOwnership
 	bool bAllSiteLicenses;
 	bool bAllActivationRequired;
 	bool bFamilyShared;
-
-	std::string DebugString() const {
-		return std::format("PackageId={} ReleaseState={} SteamId32={} MasterSubscriptionAppID={} TrialSeconds={} ExistInPackageNums={} \
-			CountryCode={} TimeStamp={} TimeExpire={} OwnsLicense={} LicenseExpired={} IsPermanent={} LowViolence={} \
-			FreeLicense={} RegionRestricted={} FromFreeWeekend={} LicenseLocked={} LicensePending={} RetailLicense={} \
-			AutoGrant={} LicensePermanent={} GuestPass={} Borrowed={} AnySiteLicense={} AllSiteLicenses={} AllActivationRequired={} FamilyShared={}",
-			PackageId, static_cast<int>(ReleaseState), SteamId32, MasterSubscriptionAppID, TrialSeconds, ExistInPackageNums, PurchaseCountryCode, TimeStamp, TimeExpire,
-			bOwnsLicense, bLicenseExpired, bIsPermanent, bLowViolence, bFreeLicense, bRegionRestricted, bFromFreeWeekend, bLicenseLocked, bLicensePending,
-			bRetailLicense, bAutoGrant, bLicensePermanent, bGuestPass, bBorrowed, bAnySiteLicense, bAllSiteLicenses, bAllActivationRequired, bFamilyShared);
-	}
-};
-
-struct CSteamApp{
-	void** vfptr;
-	int32 StateFlags;
-	AppId_t AppID;
-	// ...
 };
 
 // Single depot manifest entry (0x20 bytes) produced by BuildDepotDependency.
@@ -250,8 +239,8 @@ struct ExtendedMsgHdr
 };
 #pragma pack(pop)
 
-// ── CSteamPipeClient ────────────────────────────────────────────
-struct CSteamPipeClient {
+// ── CPipeClient ────────────────────────────────────────────
+struct CPipeClient {
     void*    m_pServer;         // +0
     void*    m_pClient;         // +8
     uint32   m_hSteamPipe;      // +16
@@ -271,3 +260,133 @@ struct CSteamPipeClient {
 			m_hSteamPipe, m_clientPID, m_szProcessName ? m_szProcessName : "?");
 	}
 };
+
+struct CGameID{
+	enum EGameIDType
+	{
+		k_EGameIDTypeApp		= 0,
+		k_EGameIDTypeGameMod	= 1,
+		k_EGameIDTypeShortcut	= 2,
+		k_EGameIDTypeP2P		= 3,
+	};
+
+	bool IsSteamApp() const
+	{
+		return ( m_gameID.m_nType == k_EGameIDTypeApp );
+	}
+
+	AppId_t AppID(bool checkType = false) const
+	{
+		if(checkType && !IsSteamApp())
+			return 0;
+		return m_gameID.m_nAppID;
+	}
+
+	void SetAppID(AppId_t nAppID)
+	{
+		m_gameID.m_nAppID = nAppID;
+	}
+
+	struct GameID_t
+	{
+		unsigned int m_nAppID : 24;
+		unsigned int m_nType : 8;
+		unsigned int m_nModID : 32;
+	};
+
+	union
+	{
+		uint64 m_ulGameID;
+		GameID_t m_gameID;
+	};
+};
+
+struct CSteamID
+{
+	CSteamID()
+	{
+		m_steamid.m_comp.m_unAccountID = 0;
+		m_steamid.m_comp.m_EAccountType = k_EAccountTypeInvalid;
+		m_steamid.m_comp.m_EUniverse = k_EUniverseInvalid;
+		m_steamid.m_comp.m_unAccountInstance = 0;
+	}
+
+	CSteamID( uint64 ulSteamID )
+	{
+		SetFromUint64( ulSteamID );
+	}
+
+	void SetFromUint64( uint64 ulSteamID )
+	{
+		m_steamid.m_unAll64Bits = ulSteamID;
+	}
+
+	uint64 ConvertToUint64() const
+	{
+		return m_steamid.m_unAll64Bits;
+	}
+
+	void SetAccountID( uint32 unAccountID )		{ m_steamid.m_comp.m_unAccountID = unAccountID; }
+	AccountID_t GetAccountID() const			{ return m_steamid.m_comp.m_unAccountID; }
+
+	friend std::ostream& operator<<(std::ostream& os, const CSteamID& steamId){
+		return os << steamId.ConvertToUint64();
+	}
+
+private:
+	union
+	{
+		struct SteamIDComponent_t
+		{
+			uint32				m_unAccountID : 32;			// unique account identifier
+			unsigned int		m_unAccountInstance : 20;	// dynamic instance ID
+			unsigned int		m_EAccountType : 4;			// type of account - can't show as EAccountType, due to signed / unsigned difference
+			EUniverse			m_EUniverse : 8;	// universe this account belongs to
+		} m_comp;
+		uint64 m_unAll64Bits;
+	} m_steamid;
+
+};
+
+struct CAppData
+{
+	void** vfptr;
+	AppId_t nAppID;
+	uint32 ChangeNumber;
+	uint32 LastChangeTimeStamp;
+	bool bSkipFlag;
+	bool bDeniedToken;
+	bool bMissingToken;
+	uint64 accessToken;
+	uint8 sha1Hash[20];
+
+	bool HasEmptyAppInfoSha() const {
+		static constexpr uint8 kEmptySha1[sizeof(sha1Hash)] = {};
+		return memcmp(sha1Hash, kEmptySha1, sizeof(sha1Hash)) == 0;
+	}
+
+	bool IsUnresolvedAppInfo() const {
+		return HasEmptyAppInfoSha() && !bSkipFlag;
+	}
+};
+
+#pragma pack(push,1)
+struct CSteamApp
+{
+	void** vfptr;
+	CGameID GameID;
+	AppId_t nAppID;
+	uint16 _unknown1;
+	uint16 _unknown2;
+	EAppReleaseState ReleaseState;
+	EAppOwnershipFlags OwnershipFlags;
+	EAppState AppStateFlags;
+	CSteamID SteamID;
+	uint32 PurchasedTime;
+	uint32 ChangeNumber;
+	uint32 LicenseExpirationTime;
+	AppId_t MasterSubAppID;
+	uint32 eProtoAppType;
+	AppId_t ParentAppID;
+};
+#pragma pack(pop)

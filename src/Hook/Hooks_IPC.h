@@ -1,54 +1,36 @@
 #pragma once
-
 #include "Steam/Types.h"
-#include "Steam/Enums.h"
 #include "Steam/Structs.h"
+#include "IPCMessages.gen.h"
+#include <span>
 
-#define ADD_IPC_HANDLER(iface, method) \
-    { EIPCInterface::iface, HASH_##iface##_##method, \
-      #iface "::" #method, \
-      Handler_##iface##_##method }
+using IPCHandlerFn = void(*)(CPipeClient* pipe,CUtlBuffer* pRead, CUtlBuffer* pWrite);
 
+struct IPCHandlerEntry {
+    const char*  interfaceName;
+    const char*  methodName;
+    IPCHandlerFn pre;
+    IPCHandlerFn post;
 
-// ── IPC InterfaceCall packet layout ─────────────────────────────
-//  offset 0:  cmd          (1 byte, EIPCCommand)
-//  offset 1:  interfaceID  (1 byte, EIPCInterface)
-//  offset 2:  hSteamUser   (4 bytes)
-//  offset 6:  funcHash     (4 bytes)
-//  offset 10: args[]       (variable)
-// ─────────────────────────────────────────────────────────────────
-constexpr int OFFSET_CMD          = 0;
-constexpr int OFFSET_INTERFACE_ID = 1;
-constexpr int OFFSET_FUNC_HASH    = 6;
-constexpr int OFFSET_ARGS         = 10;
-constexpr int IPC_HEADER_SIZE     = 10;
-constexpr uint8 RESPONSE_PREFIX   = 0x0B;
+    std::string DebugString() const {
+        return std::format("{}::{} pre={} post={}", interfaceName, methodName,
+                            pre ? "yes" : "no", post ? "yes" : "no");
+    }
+};
 
-constexpr uint32 HASH_IClientUser_GetSteamID                        = 0xD6FC3200;
-constexpr uint32 HASH_IClientUser_GetAppOwnershipTicketExtendedData = 0xC7E71245;
-constexpr uint32 HASH_IClientUser_RequestEncryptedAppTicket         = 0x25D6BB1D;
-constexpr uint32 HASH_IClientUser_GetEncryptedAppTicket             = 0xE0468CB4;
+#define ADD_IPC_PRE_HANDLER(iface, method) \
+    { #iface, #method, HandlerPre_##iface##_##method, nullptr }
 
-constexpr uint32 HASH_IClientUtils_GetAppID                         = 0x09607EC4;
-constexpr uint32 HASH_IClientUtils_GetAPICallResult                 = 0x2D3D3947;
-constexpr uint32 HASH_IClientUtils_SetAppIDForCurrentPipe           = 0x3378803C;
+#define ADD_IPC_POST_HANDLER(iface, method) \
+    { #iface, #method, nullptr, HandlerPost_##iface##_##method }
+
+#define ADD_IPC_BOTH_HANDLER(iface, method) \
+    { #iface, #method, HandlerPre_##iface##_##method, HandlerPost_##iface##_##method }
+
 
 namespace Hooks_IPC {
-
+    // IPC hooks: intercepts IPC messages between game and steam
     void Install();
     void Uninstall();
-
-    // ── Handler registry ────────────────────────────────────────
-
-    using IpcHandlerFn = void(*)(CSteamPipeClient* pipe,CUtlBuffer* pRead, CUtlBuffer* pWrite);
-
-    struct IpcHandlerEntry {
-        EIPCInterface interfaceID;
-        uint32        funcHash;
-        const char*   name;
-        IpcHandlerFn  handler;
-    };
-
-    void RegisterHandlers(const IpcHandlerEntry* entries, size_t count);
-
+    void RegisterHandlers(std::span<const IPCHandlerEntry> entries);
 }

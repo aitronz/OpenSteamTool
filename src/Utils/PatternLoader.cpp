@@ -1,15 +1,12 @@
 #include "PatternLoader.h"
-#include "Config.h"
 #include "Hash.h"
 #include "Log.h"
-#include "WinHttp.h"
+#include "RemoteToml.h"
+#include "SteamDiagnostics.h"
 
-#include <chrono>
 #include <filesystem>
-#include <fstream>
 #include <psapi.h>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -46,14 +43,6 @@ static std::unordered_set<HMODULE> g_failedModules;
 
 // functions whose names were not found during FindPattern
 static std::vector<std::string> g_missingFunctions;
-
-// Built-in fallback mirrors. Tried in this fixed order when [pattern]
-// mirror is not configured: GitHub raw first (canonical source), jsDelivr
-// (global CDN) on connection failure.
-static constexpr const char* kGithubMirror =
-    "https://raw.githubusercontent.com/OpenSteam001/steam-monitor/pattern";
-static constexpr const char* kJsdelivrMirror =
-    "https://cdn.jsdelivr.net/gh/OpenSteam001/steam-monitor@pattern";
 
 // ---- byte-pattern scanner (independent of old ByteSearch) ----
 
@@ -139,17 +128,6 @@ static PatternMap TableToPatternMap(const toml::table& tbl)
     return map;
 }
 
-static PatternMap ParsePatternFile(const std::filesystem::path& filePath)
-{
-    try {
-        return TableToPatternMap(toml::parse_file(filePath.string()));
-    } catch (const toml::parse_error& e) {
-        LOG_WARN("PatternLoader: TOML parse error in {}: {}",
-                 filePath.string(), e.description());
-        return {};
-    }
-}
-
 static PatternMap ParsePatternString(std::string_view body,
                                      std::string* outError = nullptr)
 {
@@ -169,30 +147,21 @@ static PatternMap ParsePatternString(std::string_view body,
 // failing module — the rest of OpenSteamTool keeps working.
 static void ShowDownloadFailedPopup(const std::string& dllName,
                                     const std::string& sha256,
-                                    const std::string& ghSubdir)
+                                    const std::string& component)
 {
-    std::thread([dllName, sha256, ghSubdir]() {
-        std::string msg =
-            "OpenSteamTool: signature file not found for " + dllName + ".\n\n"
-            "  Steam DLL: " + dllName + "\n"
-            "  SHA-256:   " + sha256 + "\n\n"
-            "Steam was likely just updated and the matching pattern file is "
-            "not yet published on the steam-monitor server. Hooks that depend "
-            "on " + dllName + " are disabled for this session; other modules "
-            "are unaffected.\n\n"
-            "You can:\n"
-            "  1. Wait for the next signature update (usually within hours of "
-            "a new Steam build), then restart Steam.\n"
-            "  2. Drop a matching TOML at:\n"
-            "       <Steam>\\opensteamtool\\pattern\\" + ghSubdir + "\\" + sha256 + ".toml\n"
-            "  3. Check upstream:\n"
-            "       https://github.com/OpenSteam001/steam-monitor/tree/pattern/" + ghSubdir + "\n"
-            "  4. Report this hash so it gets prioritized:\n"
-            "       https://github.com/OpenSteam001/OpenSteamTool/issues";
-        MessageBoxA(nullptr, msg.c_str(),
-                    "OpenSteamTool - Unsupported Steam Version",
-                    MB_OK | MB_ICONWARNING | MB_TOPMOST);
-    }).detach();
+    SteamDiagnostics::ShowWarning(
+        "OpenSteamTool - Unsupported Steam Version",
+        "OpenSteamTool: signature file not found for " + dllName + ".\n\n"
+        "Hooks that depend on " + dllName + " are disabled for this session; "
+        "other modules are unaffected.\n\n"
+        "You can:\n"
+        "  1. Wait for the next signature update, then restart Steam.\n"
+        "  2. Drop a matching TOML at:\n"
+        "       <Steam>\\opensteamtool\\pattern\\" + component + "\\" + sha256 + ".toml\n"
+        "  3. Check upstream:\n"
+        "       https://github.com/OpenSteam001/steam-monitor/tree/pattern/" + component + "\n"
+        "  4. Report the diagnostics below:\n"
+        "       https://github.com/OpenSteam001/OpenSteamTool/issues");
 }
 
 } // namespace
@@ -201,138 +170,36 @@ static void ShowDownloadFailedPopup(const std::string& dllName,
 
 namespace PatternLoader {
 
-bool Load(HMODULE module, const std::string& dllPath, const std::string& ghSubdir)
+    constexpr const char* kPatternChannel = "pattern";
+
+bool Load(HMODULE module, const std::string& dllPath, const std::string& component)
 {
     namespace fs = std::filesystem;
 
-    // 1. Compute SHA-256 of the DLL file on disk.
-    //    Timed so we can see the cost in main.log — useful when triaging
-    //    "Steam takes ages to start" reports from HDD users.
-    const auto hashStart = std::chrono::steady_clock::now();
-    const std::string sha256 = Sha256OfFile(dllPath);
-    const auto hashMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - hashStart).count();
+    // Delegate fetch + cache + mirror fallback to RemoteToml.
+    RemoteToml::Result r = RemoteToml::Fetch({
+        kPatternChannel,
+        component,
+        dllPath,
+    });
 
-    if (sha256.empty()) {
-        LOG_WARN("PatternLoader: Sha256OfFile failed for {} ({} ms)", dllPath, hashMs);
-        ShowDownloadFailedPopup(fs::path(dllPath).filename().string(),
-                                "(hash failed)", ghSubdir);
-        g_failedModules.insert(module);
-        return false;
-    }
-    LOG_INFO("PatternLoader: {} sha256 = {} ({} ms)", ghSubdir, sha256, hashMs);
-
-    // 2. Build local cache path and make sure the directory exists.
-    //    Cache lives at: <steam>/opensteamtool/pattern/<subdir>/<sha256>.toml
-    //    dllPath is always inside the Steam root directory.
-    fs::path steamRoot = fs::path(dllPath).parent_path();
-    fs::path cacheDir  = steamRoot / "opensteamtool" / "pattern" / ghSubdir;
-    fs::path cachePath = cacheDir / (sha256 + ".toml");
-
-    std::error_code mkdirEc;
-    fs::create_directories(cacheDir, mkdirEc);
-    if (mkdirEc) {
-        // Non-fatal: we can still try to read an existing file or hold the
-        // downloaded TOML in memory. Log it so disk-permission issues surface.
-        LOG_WARN("PatternLoader: could not create cache dir {} ({})",
-                 cacheDir.string(), mkdirEc.message());
-    }
-
-    // 3. Try remote first.  Rationale: the upstream bot can re-publish the
-    //    TOML for the same SHA-256 (adding new function signatures, fixing
-    //    stale ones, etc.).  Reading the local cache first would silently
-    //    pin users to whatever version they downloaded on day 1.  The cache
-    //    is kept purely as an offline fallback below.
-    //
-    //    Mirror selection:
-    //    - If [pattern] mirror is configured, use only that URL.  Explicit
-    //      user choice wins — no automatic fallback.
-    //    - Otherwise try GitHub raw, then jsDelivr on connection failure
-    //      (helps users where raw.githubusercontent.com is blocked).
-    //    - HTTP 404 stops the loop early: all mirrors serve the same data,
-    //      so 404 means the upstream bot hasn't published this SHA yet.
-    std::vector<std::string> mirrors;
-    if (!Config::patternMirror.empty()) {
-        mirrors.push_back(Config::patternMirror);
-    } else {
-        mirrors.emplace_back(kGithubMirror);
-        mirrors.emplace_back(kJsdelivrMirror);
-    }
-
-    WinHttp::Result result;
-    std::string url;
-    for (size_t i = 0; i < mirrors.size(); ++i) {
-        url = mirrors[i] + "/" + ghSubdir + "/" + sha256 + ".toml";
-        LOG_INFO("PatternLoader: downloading {}", url);
-
-        result = WinHttp::Execute(L"GET", url.c_str(),
-                                  nullptr, 0, nullptr,
-                                  /*timeoutResolve=*/5000,
-                                  /*timeoutConnect=*/5000,
-                                  /*timeoutSend=*/10000,
-                                  /*timeoutRecv=*/15000);
-
-        if (result.ok && result.status == 200) break;
-
-        if (result.ok && result.status == 404) {
-            LOG_WARN("PatternLoader: mirror has no such file (HTTP 404): {}", url);
-            break;  // all mirrors serve the same content — no point trying others
-        }
-
-        // Connection error or 5xx — try next mirror if any
-        if (i + 1 < mirrors.size()) {
-            LOG_WARN("PatternLoader: mirror failed ({} ok={} HTTP={}), falling back",
-                     mirrors[i], result.ok, result.status);
-        }
-    }
-
-    // 4. Remote succeeded → parse, then update cache on disk so the next
-    //    launch has an up-to-date offline fallback.
-    if (result.ok && result.status == 200) {
+    if (r.ok) {
         std::string parseErr;
-        PatternMap map = ParsePatternString(result.body, &parseErr);
+        PatternMap map = ParsePatternString(r.body, &parseErr);
         if (!map.empty()) {
-            std::ofstream ofs(cachePath, std::ios::binary);
-            if (ofs) {
-                ofs.write(result.body.data(),
-                          static_cast<std::streamsize>(result.body.size()));
-                LOG_INFO("PatternLoader: cached to {}", cachePath.string());
-            } else {
-                LOG_WARN("PatternLoader: could not open {} for writing",
-                         cachePath.string());
-            }
-            LOG_INFO("PatternLoader: loaded {} patterns for {} (remote)",
-                     map.size(), ghSubdir);
+            LOG_INFO("PatternLoader: loaded {} patterns for {} ({})",
+                     map.size(), component, r.fromCache ? "cache fallback" : "remote");
             g_moduleMaps[module] = std::move(map);
             return true;
         }
-        LOG_WARN("PatternLoader: downloaded body unparseable ({}); "
-                 "trying local cache",
-                 parseErr.empty() ? "empty or no entries" : parseErr);
+        LOG_WARN("PatternLoader: TOML for {} parsed empty ({})",
+                 component, parseErr.empty() ? "no entries" : parseErr);
     }
 
-    // 5. Remote unreachable (or returned garbage) → fall back to whatever
-    //    we previously cached for this exact SHA-256.  Better stale-but-
-    //    working than nothing at all.
-    if (fs::exists(cachePath)) {
-        LOG_WARN("PatternLoader: remote failed (last: {} HTTP {}); "
-                 "falling back to local cache {}",
-                 url, result.status, cachePath.string());
-        PatternMap map = ParsePatternFile(cachePath);
-        if (!map.empty()) {
-            LOG_INFO("PatternLoader: loaded {} patterns for {} (cache fallback)",
-                     map.size(), ghSubdir);
-            g_moduleMaps[module] = std::move(map);
-            return true;
-        }
-        LOG_WARN("PatternLoader: cache fallback also failed (file empty/invalid)");
-    }
-
-    // 6. Remote failed and no usable cache — give up.
-    LOG_WARN("PatternLoader: no source available for {} (last URL: {} HTTP {})",
-             ghSubdir, url, result.status);
+    // Total failure — popup + disable module's hooks.
     std::string dllName = fs::path(dllPath).filename().string();
-    ShowDownloadFailedPopup(dllName, sha256, ghSubdir);
+    std::string sha     = r.sha256.empty() ? "(hash failed)" : r.sha256;
+    ShowDownloadFailedPopup(dllName, sha, component);
     g_failedModules.insert(module);
     return false;
 }
@@ -412,18 +279,14 @@ void ReportMissingFunctions()
         list += "  - " + name + "\n";
     g_missingFunctions.clear();
 
-    std::thread([list]() {
-        std::string msg =
-            "OpenSteamTool: some functions could not be located.\n\n"
-            "The following functions were not found in the signature file:\n" +
-            list +
-            "\nHooks for these functions are disabled for this session.\n\n"
-            "Please report this at:\n"
-            "https://github.com/OpenSteam001/OpenSteamTool/issues";
-        MessageBoxA(nullptr, msg.c_str(),
-                    "OpenSteamTool - Missing Signatures",
-                    MB_OK | MB_ICONWARNING | MB_TOPMOST);
-    }).detach();
+    SteamDiagnostics::ShowWarning(
+        "OpenSteamTool - Missing Signatures",
+        "OpenSteamTool: some functions could not be located.\n\n"
+        "The following functions were not found in the signature file:\n" +
+        list +
+        "\nHooks for these functions are disabled for this session.\n\n"
+        "Please report this at:\n"
+        "https://github.com/OpenSteam001/OpenSteamTool/issues");
 }
 
 } // namespace PatternLoader

@@ -14,7 +14,7 @@ OpenSteamTool is a Windows DLL project built with CMake.
 - Unlock an unlimited number of unowned games.
 - Unlock all DLCs for unowned games.
 - Support auto load depot decryption keys from Lua config.
-- Support auto manifest download via `steamrun` / `wudrm` upstream APIs(default is `wudrm`), or a custom Lua endpoint (see [Manifest via Lua](#manifest-via-lua)).
+- Support auto manifest download via `opensteamtool` / `steamrun` / `wudrm` upstream APIs (default is `opensteamtool`), or a custom Lua endpoint (see [Manifest via Lua](#manifest-via-lua)).
 - Support downloading protected games or DLCs that require an access token.
 - Support binding manifest to prevent specific games from being updated.
 
@@ -22,12 +22,41 @@ OpenSteamTool is a Windows DLL project built with CMake.
 - Adding, modifying, deleting, or overwriting `.lua` files in any watched directory automatically triggers a reload. No restart, no offline/online toggle needed.
 
 ### Family Sharing and Remote Play
-- Bypass Steam Family Sharing restrictions, allowing shared games to be played without limitations.
+- Bypass Steam Family Sharing restrictions for games that have been added to the library with `addappid` in Lua. All accounts in the Steam Family that participate in sharing must use OpenSteamTool for this to work.
 
 ### Compatible with games protected by Denuvo and SteamStub
-- For AppTicket and ETicket: in `HKEY_CURRENT_USER\Software\Valve\Steam\Apps\{AppId}`, both `AppTicket` and `ETicket` are `REG_BINARY` values.
+- SteamStub-only games do not require configuring `AppTicket`. OpenSteamTool can reuse Steam's local ConfigStore ticket and forge the requested AppId through a SteamDRMP off-by-four ticket parsing vulnerability, without injecting into the game process.
+- Denuvo-protected games still require explicit ticket data. In `HKEY_CURRENT_USER\Software\Valve\Steam\Apps\{AppId}`, both `AppTicket` and `ETicket` are `REG_BINARY` values.
 - Use `setAppTicket(appid, "hex")` and `setETicket(appid, "hex")` in Lua config to write these values to the registry automatically.
-- SteamID priority: read `SteamID` as `REG_SZ` (numeric-only) first; if missing, parse from `AppTicket`.
+- AppTicket priority: explicit tickets have the highest priority, including tickets configured by `setAppTicket` and existing `AppTicket` registry values. If no explicit AppTicket is available, OpenSteamTool falls back to the forged local ConfigStore ticket path.
+- SteamID priority: read `SteamID` as `REG_SZ` (numeric-only) first; if missing, parse from explicit `AppTicket`.
+
+#### Extracting tickets with `extract_tickets`
+
+The `extract_tickets` tool dumps the `AppTicket` and `ETicket` hex strings you need for `setAppTicket` / `setETicket`. Run it on a machine where Steam is running and logged into an account that **owns** the target game.
+
+1. Build the tools (see [Build](#build)); the binary lands in `build/tools/Release/extract_tickets.exe`.
+2. Run it with the target AppId (or run it with no argument and type the AppId when prompted):
+   ```powershell
+   extract_tickets.exe 1361510
+   ```
+3. It reads the Steam install path from the registry, loads `steamclient64.dll`, and writes everything into an `<appid>/` folder next to the executable:
+   - `appticket.bin` — raw app ownership ticket (binary)
+   - `eticket.bin` — raw encrypted app ticket (binary)
+   - `tickets.txt` — plain-text summary with the hex strings:
+     ```
+     appid:1361510
+     appticket(184 bytes):14000000...
+     eticket(143 bytes):...
+     ```
+   A ticket that could not be obtained is reported as `appticket:null` / `eticket:null`.
+4. Paste the hex strings from `tickets.txt` into your Lua config:
+   ```lua
+   setAppTicket(1361510, "14000000...")
+   setETicket(1361510, "...")
+   ```
+
+> **Note:** Tickets are only valid when extracted from an account that **genuinely owns** the game.
 
 ### Stats and Achievements
 - Enable stats and achievements for unowned games.
@@ -81,8 +110,8 @@ If no config file is found, built-in defaults are used — no auto-creation.
 level = "info"
 
 [manifest]
-# Upstream API for depot manifest request codes.  Options: "steamrun", "wudrm"
-url = "steamrun"
+# Upstream API for depot manifest request codes.  Options: "opensteamtool", "steamrun", "wudrm"
+url = "opensteamtool"
 
 # HTTP timeouts for manifest requests (milliseconds)
 timeout_resolve_ms = 5000
@@ -96,10 +125,9 @@ timeout_recv_ms    = 10000
 [lua]
 paths = []
 
-# Optional signature-file mirror. See "Steam version compatibility" below.
-# Leave commented out for the built-in default (raw.githubusercontent.com).
-[pattern]
-# mirror = "https://cdn.jsdelivr.net/gh/OpenSteam001/steam-monitor@pattern"
+# Optional metadata mirror. See "Steam version compatibility" below.
+[remote]
+# url_template = "https://your.server/{channel}/{component}/{sha256}.toml"
 ```
 
 ### Manifest via Lua
@@ -143,38 +171,15 @@ You can also drop a pattern TOML into the cache directory manually if you know t
 
 #### Using a different mirror
 
-For most users, the built-in **GitHub → jsDelivr** automatic fallback is enough; you do not need to touch `opensteamtool.toml` at all.
+For most users, the built-in **GitHub -> jsDelivr** fallback is enough. To use a private mirror or intranet server, configure a full URL template. A custom mirror replaces the built-in remote sources; local cache fallback remains available.
 
-If you want to force a specific source (private mirror, intranet server, or a CDN that's faster on your network than the defaults), set it explicitly in `opensteamtool.toml`. **Setting `mirror` disables the automatic GitHub→jsDelivr fallback** — only the URL you specify is tried, on the principle that an explicit user choice should win.
+The template must include `{channel}`, `{component}`, and `{sha256}`. Channels currently used are `pattern` and `ipc`.
 
 ```toml
-[pattern]
-# Default if unset:
-#   https://raw.githubusercontent.com/OpenSteam001/steam-monitor/pattern
-# Examples:
-mirror = "https://cdn.jsdelivr.net/gh/OpenSteam001/steam-monitor@pattern"
-# mirror = "https://ghproxy.com/https://raw.githubusercontent.com/OpenSteam001/steam-monitor/pattern"
-# mirror = "https://your.server.com/opensteamtool-patterns"
+[remote]
+url_template = "https://your.server/{channel}/{component}/{sha256}.toml"
+# url_template = "https://fast.jsdelivr.net/gh/OpenSteam001/steam-monitor@{channel}/{component}/{sha256}.toml"
 ```
-
-The full URL fetched at runtime is `<mirror>/steamclient/<sha256>.toml` and `<mirror>/steamui/<sha256>.toml`. Any HTTPS server that serves the same directory layout works. A trailing `/` is allowed but optional.
-
-Resolved URL by config (example, for the `steamui` lookup):
-
-| Config | Resulting URL |
-|---|---|
-| `[pattern]` omitted, or `mirror = ""` | `https://raw.githubusercontent.com/OpenSteam001/steam-monitor/pattern/steamui/<sha>.toml` |
-| `mirror = "https://cdn.jsdelivr.net/gh/OpenSteam001/steam-monitor@pattern"` | `https://cdn.jsdelivr.net/gh/OpenSteam001/steam-monitor@pattern/steamui/<sha>.toml` |
-| `mirror = "https://your.server.com/p/"` (trailing slash) | `https://your.server.com/p/steamui/<sha>.toml` (slash stripped at parse) |
-
-**Verifying a mirror in your browser:** paste a complete URL — base + subdir + a real SHA-256 + `.toml`. The base URL alone (without the file path) will return `Invalid URL` from most CDNs, which is expected behavior, not a sign the mirror is broken. Example URLs you can paste directly:
-
-```
-https://cdn.jsdelivr.net/gh/OpenSteam001/steam-monitor@pattern/steamui/7a72275b5efc6781a964f6a8e5414ea2226c4a0a64a82e79b9e7d501dfcc3b57.toml
-https://raw.githubusercontent.com/OpenSteam001/steam-monitor/pattern/steamui/7a72275b5efc6781a964f6a8e5414ea2226c4a0a64a82e79b9e7d501dfcc3b57.toml
-```
-
-Replace the hash with a real one from [the upstream `pattern` branch](https://github.com/OpenSteam001/steam-monitor/tree/pattern/steamui). If the browser returns `200` you're good; `404` means upstream hasn't published a file for that DLL yet (open an issue), and connect/timeout errors mean the mirror itself isn't reachable from your network — pick another.
 
 ### Debug logging
 
