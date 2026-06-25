@@ -1,6 +1,7 @@
 #include "Hook/Hooks_Package.h"
 #include "Utils/Config/LuaFileWatcher.h"
 #include "Utils/Config/LuaConfig.h"
+#include "Utils/CloudRedirect/CloudRedirectHost.h"
 #include "Utils/Logging/Log.h"
 #include "OSTPlatform/include/DirectoryWatch.h"
 
@@ -115,6 +116,7 @@ void ProcessChanges(const std::vector<FileChange>& changes) {
     }
 
     Hooks_Package::NotifyLicenseChanged();
+    CloudRedirectHost::SyncAppSet();
     LOG_PACKAGE_DEBUG("Lua refresh completed");
 }
 

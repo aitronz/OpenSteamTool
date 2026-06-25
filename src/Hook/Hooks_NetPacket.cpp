@@ -5,9 +5,14 @@
 #include "dllmain.h"
 #include "Utils/Tickets/AppTicket.h"
 #include "Utils/Support/FnvHash.h"
+#include "Utils/CloudRedirect/CloudRedirectHost.h"
 #include <chrono>
+#include <cstring>
+#include <deque>
 #include <future>
+#include <mutex>
 #include <unordered_map>
+#include <vector>
 
 #include "steam_messages.pb.h"
 
@@ -37,6 +42,7 @@ namespace {
     uint8  g_SendNewBody[kMaxBodySize];
     uint32 g_cbSendNewBody = 0;
     bool   g_NeedReplaceSend = false;
+    bool   g_SuppressSend    = false;   // drop the outbound frame entirely (cloud RPC answered locally)
     uint8  g_SendPacketPool[kPacketPoolSize][kMaxPacketSize];
     int    g_SendPacketPoolIdx = 0;
 
@@ -908,6 +914,177 @@ namespace Hooks_NetPacket_OnlineFix {
 
 
 // ════════════════════════════════════════════════════════════════
+//  Hooks_NetPacket_Cloud
+//
+//  Steam Cloud save redirection via CloudRedirect (cloud_redirect.dll).
+//
+//  Outgoing: ServiceMethodCallFromClient (eMsg 151) with target_job_name
+//            "Cloud.*" for an addappid()-unlocked game.
+//  Incoming: a synthesized ServiceMethodResponse (eMsg 147) carrying the
+//            answer produced by CloudRedirect, correlated by jobid.
+//
+//  CloudRedirect answers the RPC locally (reading/writing the real save
+//  bytes to the user's cloud provider). We therefore SUPPRESS the outbound
+//  request (it must not reach Valve) and DELIVER the response the same way
+//  the RichPresence path injects packets: by borrowing the next inbound
+//  "carrier" packet for one oRecvPkt call (CloudRedirect's "Approach D").
+// ════════════════════════════════════════════════════════════════
+namespace Hooks_NetPacket_Cloud {
+
+    std::mutex                     g_queueMutex;
+    std::deque<std::vector<uint8>> g_pending;        // ready-to-inject 147 packets
+    uint64                         g_localSteamId = 0;
+
+    // ── minimal top-level protobuf varint field reader ──────────
+    // Avoids pulling the Cloud.* request message definitions into the
+    // proto set just to read one appid field.
+    static bool ReadVarint(const uint8* d, uint32 size, uint32& pos, uint64& out) {
+        out = 0;
+        int shift = 0;
+        while (pos < size) {
+            uint8 b = d[pos++];
+            out |= static_cast<uint64>(b & 0x7F) << shift;
+            if (!(b & 0x80)) return true;
+            shift += 7;
+            if (shift >= 64) return false;
+        }
+        return false;
+    }
+
+    static bool FindVarintField(const uint8* d, uint32 size, uint32 target, uint64& out) {
+        uint32 pos = 0;
+        while (pos < size) {
+            uint64 tag;
+            if (!ReadVarint(d, size, pos, tag)) return false;
+            const uint32 field   = static_cast<uint32>(tag >> 3);
+            const uint32 wireType = static_cast<uint32>(tag & 7);
+            if (field == target && wireType == 0)
+                return ReadVarint(d, size, pos, out);
+
+            switch (wireType) {
+            case 0: { uint64 tmp; if (!ReadVarint(d, size, pos, tmp)) return false; break; }
+            case 1: if (pos + 8 > size) return false; pos += 8; break;
+            case 5: if (pos + 4 > size) return false; pos += 4; break;
+            case 2: {
+                uint64 len;
+                if (!ReadVarint(d, size, pos, len)) return false;
+                if (pos + len > size) return false;
+                pos += static_cast<uint32>(len);
+                break;
+            }
+            default: return false;   // groups (3/4) — bail
+            }
+        }
+        return false;
+    }
+
+    // appid lives in field 1 of every Cloud.* request except
+    // ClientCommitFileUpload, where it is field 2 (mirrors CloudRedirect's
+    // CloudRpcUtils::ExtractAppId).
+    static uint32 ExtractAppId(const char* jobName, const uint8* body, uint32 cbBody) {
+        uint32 fieldNum = 1;
+        if (std::strcmp(jobName, "Cloud.ClientCommitFileUpload#1") == 0)
+            fieldNum = 2;
+        uint64 v = 0;
+        if (FindVarintField(body, cbBody, fieldNum, v))
+            return static_cast<uint32>(v);
+        return 0;
+    }
+
+    // Returns true when CloudRedirect handled the request — the caller must
+    // then suppress the outbound frame.
+    bool HandleSend(const char* jobName,
+                    const uint8* pBody, uint32 cbBody,
+                    const uint8* pHdr, uint32 cbHdr)
+    {
+        if (!CloudRedirectHost::IsActive()) return false;
+
+        CMsgProtoBufHeader reqHdr;
+        if (!reqHdr.ParseFromArray(pHdr, cbHdr)) return false;
+        if (reqHdr.has_steamid() && reqHdr.steamid())
+            g_localSteamId = reqHdr.steamid();
+
+        const uint32 appId = ExtractAppId(jobName, pBody, cbBody);
+        if (appId == 0 || !CloudRedirectHost::IsApp(appId)) return false;
+
+        const uint32 accountId = static_cast<uint32>(g_localSteamId & 0xFFFFFFFFull);
+
+        static thread_local uint8 respBuf[kMaxBodySize];
+        uint32  respLen  = 0;
+        int32_t eresult  = 2;   // EResult::Fail
+        if (!CloudRedirectHost::HandleCloudRpc(jobName, appId, accountId,
+                                               pBody, cbBody,
+                                               respBuf, static_cast<uint32_t>(sizeof(respBuf)),
+                                               &respLen, &eresult)) {
+            return false;   // not a namespace app / unrecognised — let it pass through
+        }
+
+        // Build the 147 ServiceMethodResponse correlated to the request job.
+        CMsgProtoBufHeader respHdr;
+        if (reqHdr.has_jobid_source()) respHdr.set_jobid_target(reqHdr.jobid_source());
+        respHdr.set_eresult(eresult);
+        respHdr.set_target_job_name(jobName);
+
+        const uint32 cbRespHdr = static_cast<uint32>(respHdr.ByteSizeLong());
+        const uint32 total     = sizeof(MsgHdr) + cbRespHdr + respLen;
+        if (cbRespHdr > kMaxHdrSize || respLen > kMaxBodySize || total > kMaxPacketSize) {
+            // Can't deliver a response this big — fall through so Steam errors
+            // normally instead of leaving the job hung.
+            LOG_NETPACKET_WARN("Cloud: {} response too large ({} bytes), passing through",
+                               jobName, total);
+            return false;
+        }
+
+        std::vector<uint8> pkt(total);
+        auto* mhdr = reinterpret_cast<MsgHdr*>(pkt.data());
+        mhdr->eMsg = static_cast<EMsg>(
+            static_cast<uint32>(k_EMsgServiceMethodResponse) | kMsgHdrProtoFlag);
+        mhdr->headerLength = cbRespHdr;
+        if (!respHdr.SerializeToArray(pkt.data() + sizeof(MsgHdr), cbRespHdr))
+            return false;
+        if (respLen)
+            memcpy(pkt.data() + sizeof(MsgHdr) + cbRespHdr, respBuf, respLen);
+
+        {
+            std::lock_guard lk(g_queueMutex);
+            if (g_pending.size() < 64)
+                g_pending.push_back(std::move(pkt));
+        }
+        LOG_NETPACKET_DEBUG("Cloud: handled {} app={} -> queued {}-byte response (eresult={})",
+                            jobName, appId, total, eresult);
+        return true;
+    }
+
+    // Deliver any queued cloud responses by borrowing the carrier packet for
+    // one oRecvPkt call each (same trick as RichPresence::TryInject). Runs on
+    // the network thread from inside the RecvPkt hook.
+    void Drain(void* pThis, CNetPacket* pCarrier,
+               bool (*invokeOriginal)(void*, CNetPacket*))
+    {
+        for (;;) {
+            std::vector<uint8> pkt;
+            {
+                std::lock_guard lk(g_queueMutex);
+                if (g_pending.empty()) return;
+                pkt = std::move(g_pending.front());
+                g_pending.pop_front();
+            }
+
+            uint8* origData = pCarrier->m_pubData;
+            uint32 origSize = pCarrier->m_cubData;
+            pCarrier->m_pubData = pkt.data();
+            pCarrier->m_cubData = static_cast<uint32>(pkt.size());
+            invokeOriginal(pThis, pCarrier);
+            pCarrier->m_pubData = origData;
+            pCarrier->m_cubData = origSize;
+            LOG_NETPACKET_DEBUG("Cloud: delivered {}-byte response", pkt.size());
+        }
+    }
+
+} // namespace Hooks_NetPacket_Cloud
+
+
+// ════════════════════════════════════════════════════════════════
 //  Dispatch
 // ════════════════════════════════════════════════════════════════
 namespace {
@@ -917,6 +1094,16 @@ namespace {
                         const uint8* pHdr, uint32 cbHdr)
     {
         LOG_NETPACKET_DEBUG("Send target_job_name: {}", targetJobName);
+
+        // Steam Cloud save redirection: hand every "Cloud.*" request to
+        // CloudRedirect. If it answers, suppress the outbound frame (the
+        // synthesized response is delivered from the RecvPkt hook).
+        if (std::strncmp(targetJobName, "Cloud.", 6) == 0) {
+            if (Hooks_NetPacket_Cloud::HandleSend(targetJobName, pBody, cbBody, pHdr, cbHdr))
+                g_SuppressSend = true;
+            return false;   // never body-replace a cloud frame
+        }
+
         switch (Fnv1aHash(targetJobName)) {
 
         case HASH_JOB_GetUserStats:
@@ -934,6 +1121,7 @@ namespace {
                  const uint8* pHdr, uint32 cbHdr)
     {
         g_NeedReplaceSend = false;
+        g_SuppressSend    = false;
 
         LOG_NETPACKET_DEBUG("Send eMsg {}({}) (cbBody={}, cbHdr={})",
                         MsgName(eMsg), static_cast<uint32>(eMsg), cbBody, cbHdr);
@@ -1059,6 +1247,12 @@ namespace {
         if (UnpackRaw(pubData, cubData, eMsg, pHdr, cbHdr, pBody, cbBody)) {
             SendJob(eMsg, pBody, cbBody, pHdr, cbHdr);
 
+            if (g_SuppressSend) {
+                // CloudRedirect answered this RPC locally; do not forward to
+                // Valve. Report success so Steam treats the frame as sent.
+                return true;
+            }
+
             if (g_NeedReplaceSend) {
                 uint32 newSize = 0;
                 uint8* buf = ReplaceSendPacket(pubData, cbHdr, pHdr,
@@ -1079,6 +1273,10 @@ namespace {
     HOOK_FUNC(RecvPkt, void*, void* pThis, CNetPacket* pPacket)
     {
         Hooks_NetPacket_RichPresence::TryInject(
+            pThis, pPacket,
+            [](void* pT, CNetPacket* pP) -> bool { return oRecvPkt(pT, pP) != nullptr; });
+
+        Hooks_NetPacket_Cloud::Drain(
             pThis, pPacket,
             [](void* pT, CNetPacket* pP) -> bool { return oRecvPkt(pT, pP) != nullptr; });
 

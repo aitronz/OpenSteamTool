@@ -19,6 +19,7 @@ namespace {
         std::string remoteUrlTemplate;
         bool statsEnableApi = true;
         std::vector<InjectDll> injectDlls;
+        CloudSettings cloud;
     };
 
     std::mutex g_mutex;
@@ -53,6 +54,8 @@ namespace {
         remoteUrlTemplate      = snapshot.remoteUrlTemplate;
         statsEnableApi         = snapshot.statsEnableApi;
         injectDlls             = snapshot.injectDlls;
+        cloudEnabled           = snapshot.cloud.enabled;
+        cloudLibrary           = snapshot.cloud.library;
     }
 
     void ApplyManifestProvider(const std::string& provider) {
@@ -171,6 +174,14 @@ namespace {
                 }
             }
 
+            // [cloud]
+            if (auto cloud = tbl["cloud"].as_table()) {
+                if (auto val = (*cloud)["enabled"].value<bool>())
+                    snapshot.cloud.enabled = *val;
+                if (auto val = (*cloud)["library"].value<std::string>())
+                    snapshot.cloud.library = *val;
+            }
+
             ApplyManifestProvider(snapshot.manifestProvider);
             LoadResult result = ApplySnapshotLocked(snapshot);
             LOG_INFO("Config loaded: manifest.url={} log.level={} lua.paths={} stats.enable_api={} remote.url_template={}",
@@ -235,6 +246,14 @@ namespace {
     bool GetStatsEnableApi() {
         std::lock_guard lock(g_mutex);
         return statsEnableApi;
+    }
+
+    CloudSettings GetCloudSettings() {
+        std::lock_guard lock(g_mutex);
+        return {
+            cloudEnabled,
+            cloudLibrary,
+        };
     }
 
 }

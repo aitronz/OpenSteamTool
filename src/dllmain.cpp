@@ -2,6 +2,7 @@
 #include "Hook/HookManager.h"
 #include "Utils/Config/ConfigFileWatcher.h"
 #include "Utils/Config/LuaFileWatcher.h"
+#include "Utils/CloudRedirect/CloudRedirectHost.h"
 #include "Utils/SteamMetadata/IPCLoader.h"
 #include "Utils/SteamMetadata/PatternLoader.h"
 #include "Utils/SteamMetadata/SteamDiagnostics.h"
@@ -81,6 +82,10 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
     // Surface any functions that FindPattern() could not locate.
     PatternLoader::ReportMissingFunctions();
 
+    // Optional Steam Cloud save redirection (CloudRedirect). No-op unless
+    // [cloud].enabled is set and cloud_redirect.dll is present.
+    CloudRedirectHost::Initialize(SteamInstallPath);
+
     LOG_INFO("OpenSteamTool init complete");
     return 0;
 }
@@ -102,6 +107,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved)
         LuaFileWatcher::Stop();
         SteamUI::CoreUnhook();
         SteamClient::CoreUnhook();
+        CloudRedirectHost::Shutdown();
     }
 
     return TRUE;

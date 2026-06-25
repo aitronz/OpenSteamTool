@@ -26,6 +26,11 @@ namespace Config {
         bool                        allGames = false;  // false: only Lua-unlocked games
     };
 
+    struct CloudSettings {
+        bool enabled = false;
+        std::string library;
+    };
+
     struct LoadResult {
         bool applied = false;
         bool luaPathsChanged = false;
@@ -38,6 +43,7 @@ namespace Config {
     std::string GetLogDir();
     std::vector<std::string> GetLuaPaths();
     std::string GetRemoteUrlTemplate();
+    CloudSettings GetCloudSettings();
     bool GetStatsEnableApi();
 
     // [manifest] — provider selection lives in ManifestClient (table-driven).
@@ -63,5 +69,9 @@ namespace Config {
 
     // [[inject]] - optional DLL injection into matching game processes.
     inline std::vector<InjectDll> injectDlls;
+
+    // [cloud] - optional Steam Cloud save redirection via CloudRedirect.
+    inline bool cloudEnabled = false;
+    inline std::string cloudLibrary;
 
 }
