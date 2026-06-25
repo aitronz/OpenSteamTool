@@ -28,7 +28,7 @@ namespace {
         AppId_t appId = static_cast<AppId_t>(pGameID->AppID(true));
         const char* cmdLine = VehCommon::GetArg<const char*>(ctx, 3);
 
-        if (LuaConfig::HasDepot(appId) && cmdLine && strstr(cmdLine, "-onlinefix"))
+        if (cmdLine && strstr(cmdLine, "-onlinefix"))
         {
             g_OnlineFixRealAppId = appId;
             pGameID->SetAppID(kOnlineFixAppId);
