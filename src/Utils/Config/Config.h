@@ -2,7 +2,10 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_set>
 #include <vector>
+
+#include "Steam/Types.h"
 
 namespace Config {
 
@@ -15,10 +18,12 @@ namespace Config {
         uint32_t recv    = 10000;
     };
 
-    struct InjectionSettings {
-        bool enabled = false;
-        std::string libraryX86;
-        std::string libraryX64;
+    // [[inject]] entry: a DLL loaded into a matching game process at the IPC handshake.
+    struct InjectDll {
+        std::string                 path;        // resolved absolute path
+        std::string                 whenCmdline; // substring required in the game command line
+        std::unordered_set<AppId_t> whenAppids;  // appids this entry applies to
+        bool                        allGames = false;  // false: only Lua-unlocked games
     };
 
     struct LoadResult {
@@ -33,7 +38,6 @@ namespace Config {
     std::string GetLogDir();
     std::vector<std::string> GetLuaPaths();
     std::string GetRemoteUrlTemplate();
-    InjectionSettings GetInjectionSettings();
     bool GetStatsEnableApi();
 
     // [manifest] — provider selection lives in ManifestClient (table-driven).
@@ -57,9 +61,7 @@ namespace Config {
     // [stats]
     inline bool statsEnableApi = true;
 
-    // [inject] - optional library injection into game processes.
-    inline bool injectEnabled = false;
-    inline std::string injectLibraryX86;
-    inline std::string injectLibraryX64;
+    // [[inject]] - optional DLL injection into matching game processes.
+    inline std::vector<InjectDll> injectDlls;
 
 }
