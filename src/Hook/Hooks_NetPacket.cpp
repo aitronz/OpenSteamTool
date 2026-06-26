@@ -4,11 +4,14 @@
 #include "HookMacros.h"
 #include "dllmain.h"
 #include "Utils/Tickets/AppTicket.h"
+#include "Utils/Tickets/EticketClient.h"
 #include "Utils/Support/FnvHash.h"
 #include "Utils/CloudRedirect/CloudRedirectHost.h"
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <deque>
+#include <string>
 #include <future>
 #include <mutex>
 #include <unordered_map>
@@ -432,6 +435,71 @@ namespace Hooks_NetPacket_ETicket {
     }
 
 } // namespace Hooks_NetPacket_ETicket
+
+
+// ════════════════════════════════════════════════════════════════
+//  Hooks_NetPacket_OwnershipTicket
+//
+//  Incoming: MsgClientGetAppOwnershipTicketResponse (eMsg 858).
+//  Some Denuvo titles (e.g. Suicide Squad: KTJL) verify ownership via this
+//  network message instead of the IPC GetAppOwnershipTicketExtendedData hook,
+//  so OST's IPC ownership spoof never engages and the real (non-owning) account
+//  leaks through -> 88500012. 858 is a legacy NON-protobuf message with no
+//  schema in-tree and responses of varying size, so log the raw layout first;
+//  the spoof (inject the owner's signed ticket from the credential store) is
+//  wired once the exact field offsets are confirmed from a live capture.
+// ════════════════════════════════════════════════════════════════
+namespace Hooks_NetPacket_OwnershipTicket {
+
+    void HandleRecv(const uint8* pBody, uint32 cbBody)
+    {
+        CMsgClientGetAppOwnershipTicketResponse resp;
+        if (!resp.ParseFromArray(pBody, cbBody)) {
+            LOG_NETPACKET_WARN("OwnershipTicketResponse[858]: failed to ParseFromArray (cbBody={})", cbBody);
+            return;
+        }
+
+        // Steam already returned a valid ticket (account owns it) — leave it.
+        if (resp.eresult() == k_EResultOK) return;
+        if (!LuaConfig::HasDepot(resp.app_id())) return;
+
+        const int32 origEresult = resp.eresult();
+
+        // Owner's signed ownership ticket, from the SAME mint as the eticket
+        // (one /eticket call → both tickets → one account). Ownership tickets are
+        // not nonce-bound, so pass an empty nonce. Fall back to the credential
+        // store (redeemed account) if the backend is unavailable.
+        auto owner = EticketClient::FetchOwnershipTicket(resp.app_id(), {});
+        if (!owner) {
+            auto stored = AppTicket::GetAppOwnershipTicketFromCredentialStore(resp.app_id());
+            if (stored.empty()) {
+                LOG_NETPACKET_WARN("OwnershipTicketResponse[858]: appid={} eresult={} but no owner ticket available",
+                                   resp.app_id(), origEresult);
+                return;
+            }
+            owner = std::move(stored);
+        }
+
+        resp.set_ticket(owner->data(), owner->size());
+        resp.set_eresult(k_EResultOK);
+
+        const auto encSize = resp.ByteSizeLong();
+        if (encSize > sizeof(g_NewBody)) {
+            LOG_NETPACKET_WARN("OwnershipTicketResponse[858]: modified message too large ({})", encSize);
+            return;
+        }
+        if (!resp.SerializeToArray(g_NewBody, sizeof(g_NewBody))) {
+            LOG_NETPACKET_WARN("OwnershipTicketResponse[858]: failed to SerializeToArray");
+            return;
+        }
+
+        g_cbNewBody = static_cast<uint32>(encSize);
+        g_NeedReplaceBody = true;
+        LOG_NETPACKET_INFO("OwnershipTicketResponse[858]: spoofed appid={} ticket_bytes={} (orig eresult={} -> OK)",
+                           resp.app_id(), owner->size(), origEresult);
+    }
+
+} // namespace Hooks_NetPacket_OwnershipTicket
 
 
 // ════════════════════════════════════════════════════════════════
@@ -1222,6 +1290,10 @@ namespace {
 
         case k_EMsgClientPersonaState:                 // 766
             g_NeedReplaceBody = Hooks_NetPacket_RichPresence::HandleRecv(pBody, cbBody, pHdr, cbHdr);
+            return;
+
+        case k_EMsgClientGetAppOwnershipTicketResponse:   // 858
+            Hooks_NetPacket_OwnershipTicket::HandleRecv(pBody, cbBody);
             return;
 
         default:

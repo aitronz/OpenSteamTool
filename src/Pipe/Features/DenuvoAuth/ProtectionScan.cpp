@@ -69,15 +69,25 @@ namespace {
     // Structural fallback for Denuvo builds that ship NO OEP pattern and NO
     // "DENUVO" string (both checks above return nothing). A runtime-decrypting
     // protector must still carry a large code section that is simultaneously
-    // writable AND executable (it decrypts itself in place) and encrypted at
-    // rest (high entropy). That triad is version-independent and effectively
-    // absent from legitimately compiled binaries (which ship read-only code).
-    // Measured on Sonic Forces (637100): .arch is RWX, 103.9 MB, entropy 7.247,
-    // while its OEP section is a clean read-only stub — so this is the only
-    // method that fires on it. Clean binaries (steam/notepad/explorer) have no
-    // W+X section at all.
+    // writable AND executable (it decrypts itself in place). That W+X-on-disk
+    // flag is the decisive, version-independent signal: it is effectively
+    // absent from legitimately compiled binaries, which ship read-only code
+    // (R-X) and non-executable data (RW-). No modern toolchain emits a multi-MB
+    // section that is both writable and executable on disk.
+    //
+    // Entropy is only a weak sanity floor here, NOT the discriminator — it
+    // rejects sparse / zero-filled / trivially-compressible blobs while the
+    // W+X + size condition carries the decision. Protector blobs vary widely:
+    //   Sonic Forces (637100): .arch RWX, 103.9 MB, entropy 7.247
+    //   APK    (Unreal Shipping): .bss  RWX, 405.6 MB, entropy 6.651 (uniform
+    //                             across the whole section — not a sample fluke)
+    // A 7.0 floor false-negatived the second one despite it carrying the literal
+    // "DENUVO" string, so the floor is set just above normal x64 code (~6.0-6.4)
+    // rather than at "looks encrypted". We do NOT key off the section name
+    // (.arch/.bss) — Denuvo renames sections freely.
     constexpr uint32 kProtectorBlobMinBytes = 4u * 1024u * 1024u;       // skip small legit RWX thunks
-    constexpr double kProtectorBlobMinEntropy = 7.0;                    // encrypted/packed bits/byte
+    constexpr double kProtectorBlobMinEntropy = 6.0;                    // sparse/zero guard, not "is encrypted"
+    constexpr double kProtectorBlobHighConfidenceEntropy = 7.0;         // looks encrypted/packed at rest
     constexpr size_t kProtectorBlobEntropySampleBytes = 8ull * 1024ull * 1024ull;  // cap per-section read
 
     double SectionEntropy(std::span<const uint8_t> bytes) {
@@ -286,9 +296,11 @@ namespace {
             match.entryPointRva = image.EntryPointRva();
             match.matchRawOffset = section.rawOffset;
             match.matchRva = section.virtualAddress;
-            LOG_PIPE_INFO("DenuvoAuth: protector blob section path={} section={} raw_size={} ({:.2f} MB) entropy={:.3f} flags=RWX",
+            const char* confidence =
+                entropy >= kProtectorBlobHighConfidenceEntropy ? "high(encrypted)" : "elevated";
+            LOG_PIPE_INFO("DenuvoAuth: protector blob section path={} section={} raw_size={} ({:.2f} MB) entropy={:.3f} flags=RWX confidence={}",
                           module.path, section.name, section.rawSize,
-                          BytesToMiB(static_cast<uint64>(section.rawSize)), entropy);
+                          BytesToMiB(static_cast<uint64>(section.rawSize)), entropy, confidence);
             return match;
         }
         return std::nullopt;
