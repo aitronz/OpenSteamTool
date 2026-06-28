@@ -7,6 +7,7 @@
 #include "Pipe/Features/DenuvoAuth/DenuvoAuth.h"
 #include "Utils/Logging/Log.h"
 #include "Hooks_Misc.h"
+#include "Utils/Config/LuaConfig.h"
 
 #include <mutex>
 #include <unordered_map>
@@ -29,14 +30,15 @@ namespace {
         GetSteamIDResp resp{pWrite};
         if (!resp.ok()) return;
 
-        if (!PipeManager::DenuvoAuth::IsAuthorizedPipe(pipe)) {
-            LOG_IPC_TRACE("IClientUser::GetSteamID: AppId={} not in authorization window, skip spoofing", appId);
-            return;
-        }
-
+        // Spoof whenever we have a pool-account ticket for this app, not just
+        // inside the Denuvo auth window. Denuvo reads its cached offline
+        // license on second launch and calls GetSteamID BEFORE or AFTER the
+        // auth window to verify it — if we only spoof inside the window the
+        // real SteamID leaks out and mismatches the license → 012.
+        // GetSpoofSteamID returns 0 for apps with no credential-store ticket
+        // (real owners, non-tracked apps) so the spoof is naturally scoped.
         const uint64 spoofed = AppTicket::GetSpoofSteamID(appId);
         if (!spoofed) {
-            LOG_IPC_WARN("IClientUser::GetSteamID: AppId={} no valid steamid - cannot spoof", appId);
             return;
         }
 
@@ -61,8 +63,12 @@ namespace {
         if (PipeManager::DenuvoAuth::IsAuthorizedPipe(pipe)) {
             ticketSource = AppTicket::AppTicketSource::CredentialStoreOnly;
         } else {
-            LOG_IPC_DEBUG("IClientUser::GetAppOwnershipTicketExtendedData: AppId={} not in authorization window, only forge available", appId);
-            ticketSource = AppTicket::AppTicketSource::ForgeOnly;
+            // Outside the auth window: prefer credential-store ticket (pool SteamID)
+            // over ForgeOnly (which uses app 7's ticket and carries the real SteamID).
+            // When the 858 network spoof is also active, both paths must agree on the
+            // same SteamID or Denuvo cross-checks them and rejects (error 54).
+            LOG_IPC_DEBUG("IClientUser::GetAppOwnershipTicketExtendedData: AppId={} not in authorization window, credential store preferred", appId);
+            ticketSource = AppTicket::AppTicketSource::CredentialStoreThenForge;
         }        
         if (!AppTicket::GetAppOwnershipTicket(appId, ticket, ticketSource)) return;
 
@@ -104,9 +110,20 @@ namespace {
             RequestEncryptedAppTicketReq req{pRead};
             std::span<const uint8_t> nonce;
             if (req.ok()) nonce = req.pData();
-            if (auto fresh = EticketClient::FetchFreshEticket(appId, nonce)) {
-                std::lock_guard<std::mutex> lock(g_freshEticketMutex);
-                g_freshEticket[appId] = std::move(*fresh);
+            // Whatever account the registry's current static ticket already
+            // belongs to (0 if none) — lets the backend pin the mint to that
+            // SAME account instead of risking a different pool pick.
+            const uint64_t existingSteamId = AppTicket::ExtractSteamIdFromTicketBytes(
+                AppTicket::GetAppOwnershipTicketFromCredentialStore(appId));
+            // Only mint on-demand etickets for games explicitly marked forcedenuvo —
+            // those are the strict Denuvo titles that require a nonce-bound ticket.
+            // For normally-detected Denuvo games the minted ticket carries the wrong
+            // SteamID (pool account vs spoofed user) and Denuvo rejects it (error 54).
+            if (LuaConfig::IsForcedDenuvo(appId)) {
+                if (auto fresh = EticketClient::FetchFreshEticket(appId, nonce, existingSteamId)) {
+                    std::lock_guard<std::mutex> lock(g_freshEticketMutex);
+                    g_freshEticket[appId] = std::move(*fresh);
+                }
             }
         }
 
