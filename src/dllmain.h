@@ -40,3 +40,8 @@ inline char ConfigPath[kRuntimePathCapacity]       = {};
 constexpr AppId_t kOnlineFixAppId = 480;
 
 #endif // DLLMAIN_H
+
+// The fake AppId used by -onlinefix (SpaceWar).
+constexpr AppId_t kOnlineFixAppId = 480;
+
+#endif // DLLMAIN_H
