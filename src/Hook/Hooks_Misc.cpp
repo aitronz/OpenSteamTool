@@ -9,12 +9,14 @@ namespace {
 
     // ── VEH-captured functions (one-shot int3) ───────────────────────────────
     // On int3 hit, ctx->Rcx is stored to the named output variable.
-    CAPTURE_THIS_FUNC(GetAppIDForCurrentPipe, AppId_t,      g_steamEngine,    void*);
     CAPTURE_THIS_FUNC(GetAppDataFromAppInfo,  int64,        g_pCAppInfoCache, void*, AppId_t, const char*, uint8*, int32);
 
     // Assumes one game at a time.  Set by SpawnProcess VEH when -onlinefix
     // is detected; cleared when a non-onlinefix game launches.
     AppId_t   g_OnlineFixRealAppId;
+    void*     g_steamEngine = nullptr;
+    HSteamPipe g_OnlineFixUserStatsPipe = 0;
+    thread_local uint32 g_userStatsAppIdOverrideDepth = 0;
     std::unordered_map<AppId_t, std::string> g_GameNameCache;
 
 
@@ -31,11 +33,27 @@ namespace {
         if (cmdLine && strstr(cmdLine, "-onlinefix"))
         {
             g_OnlineFixRealAppId = appId;
+            g_OnlineFixUserStatsPipe = 0;
             pGameID->SetAppID(kOnlineFixAppId);
             LOG_MISC_INFO("SpawnProcess: appid {} -> {}, cmd=\"{}\"",appId, kOnlineFixAppId, cmdLine);
         } else {
             g_OnlineFixRealAppId = 0;
+            g_OnlineFixUserStatsPipe = 0;
         }
+    }
+
+    // ── GetAppIDForCurrentPipe ───────────────────────────────────────────────
+    HOOK_FUNC(GetAppIDForCurrentPipe, AppId_t, void* pEngine)
+    {
+        g_steamEngine = pEngine;
+        const AppId_t appId = oGetAppIDForCurrentPipe(pEngine);
+        if (g_userStatsAppIdOverrideDepth && g_OnlineFixRealAppId
+            && appId == kOnlineFixAppId) {
+            LOG_MISC_TRACE("GetAppIDForCurrentPipe: user-stats OnlineFix AppId={} -> {}",
+                           appId, g_OnlineFixRealAppId);
+            return g_OnlineFixRealAppId;
+        }
+        return appId;
     }
 
     // ── SteamController_OptedInMask ──────────────────────────────────────────
@@ -101,12 +119,12 @@ namespace Hooks_Misc {
     void Install() {
         RESOLVE_C(CUtlBufferEnsureCapacity);
 
-        ARM_CAPTURE_C(GetAppIDForCurrentPipe);
         ARM_CAPTURE_C(GetAppDataFromAppInfo);
 
         ARM_INT3_C(SpawnProcess, true, &OnSpawnProcessHit, nullptr);
 
         HOOK_BEGIN();
+        INSTALL_HOOK_D(GetAppIDForCurrentPipe);
         INSTALL_HOOK_C(BuildSpawnEnvBlock);
         INSTALL_HOOK_C(OptedInMask);
         // INSTALL_HOOK_C(GetOrAddAppData);
@@ -115,6 +133,7 @@ namespace Hooks_Misc {
 
     void Uninstall() {
         UNHOOK_BEGIN();
+        UNINSTALL_HOOK(GetAppIDForCurrentPipe);
         UNINSTALL_HOOK(BuildSpawnEnvBlock);
         UNINSTALL_HOOK(OptedInMask);
         // UNINSTALL_HOOK(GetOrAddAppData);
@@ -122,8 +141,8 @@ namespace Hooks_Misc {
     }
 
     AppId_t GetAppIDForCurrentPipeWrap() {
-        if (!CAPTURE_READY(GetAppIDForCurrentPipe)) {
-            LOG_MISC_WARN("GetAppIDForCurrentPipeWrap called before capture — returning 0");
+        if (!g_steamEngine || !oGetAppIDForCurrentPipe) {
+            LOG_MISC_WARN("GetAppIDForCurrentPipeWrap called before hook — returning 0");
             return 0;
         }
         auto appid = oGetAppIDForCurrentPipe(g_steamEngine);
@@ -177,6 +196,35 @@ namespace Hooks_Misc {
         LOG_MISC_DEBUG("GetGameNameByAppID({}): {}", appId, name);
         g_GameNameCache[appId] = name;
         return name;
+    }
+
+    void SetUserStatsContext(HSteamPipe hSteamPipe, bool active)
+    {
+        if (active) {
+            if (g_OnlineFixRealAppId)
+                g_OnlineFixUserStatsPipe = hSteamPipe;
+            ++g_userStatsAppIdOverrideDepth;
+        } else if (g_userStatsAppIdOverrideDepth) {
+            --g_userStatsAppIdOverrideDepth;
+        }
+    }
+
+    bool RewriteOnlineFixUserStatsCallback(HSteamPipe hSteamPipe, uint64& gameId)
+    {
+        constexpr uint64 appIdMask = 0xFFFFFF;
+        if (!g_OnlineFixRealAppId || hSteamPipe != g_OnlineFixUserStatsPipe
+            || static_cast<AppId_t>(gameId & appIdMask) != g_OnlineFixRealAppId) {
+            return false;
+        }
+
+        gameId = (gameId & ~appIdMask) | kOnlineFixAppId;
+        return true;
+    }
+
+    bool ShouldRouteOnlineFixUserStatsCallback(AppId_t routeAppId)
+    {
+        return g_OnlineFixRealAppId && g_OnlineFixUserStatsPipe
+            && routeAppId == g_OnlineFixRealAppId;
     }
 
 }

@@ -52,6 +52,7 @@ namespace {
     struct IPCDispatch {
         CPipeClient*     pipe = nullptr;
         ResolvedHandler* handler = nullptr;
+        bool             userStatsCall = false;  // IClientUserStats interface call
 
         bool enabled() const {
             return pipe && handler;
@@ -81,9 +82,12 @@ namespace {
         IPCMessages::IPCInterfaceCall call{request.body()};
         if (!call.ok()) return dispatch;
 
+        // Detect IClientUserStats calls for OnlineFix SetUserStatsContext wrapping
+        dispatch.userStatsCall = (call.interfaceID() == IClientUserStats);
+
         // Lookup handler by interface ID + method hash
         dispatch.handler = FindHandler(call.interfaceID(), call.funcHash());
-        if (!dispatch.handler) return dispatch;
+        if (!dispatch.handler && !dispatch.userStatsCall) return dispatch;
 
         LOG_IPC_TRACE("Resolved IPC handler: {}", dispatch.DebugString());
         return dispatch;
@@ -112,18 +116,25 @@ namespace {
         HandleHandshake(pServer, hSteamPipe, pRead);
 
         IPCDispatch dispatch = ResolveDispatch(pServer, hSteamPipe, pRead);
-        // If we didn't find a handler for this message, just pass through to the original function.
-        if(!dispatch.enabled()) return oIPCProcessMessage(pServer, hSteamPipe, pRead, pWrite);
+        // If we didn't find a handler and it's not a user-stats call, pass through.
+        if(!dispatch.enabled() && !dispatch.userStatsCall)
+            return oIPCProcessMessage(pServer, hSteamPipe, pRead, pWrite);
 
         // If we did find a handler, run the pre-handler
-        if (dispatch.handler->pre)
+        if (dispatch.handler && dispatch.handler->pre)
             dispatch.handler->pre(dispatch.pipe, pRead, pWrite);
 
+        // Wrap user-stats calls with SetUserStatsContext so GetAppIDForCurrentPipe
+        // returns the real AppID during stats fetch operations.
+        if (dispatch.userStatsCall)
+            Hooks_Misc::SetUserStatsContext(hSteamPipe, true);
         // Then call the original function to let steamclient process the message as normal.
         bool result = oIPCProcessMessage(pServer, hSteamPipe, pRead, pWrite);
+        if (dispatch.userStatsCall)
+            Hooks_Misc::SetUserStatsContext(hSteamPipe, false);
 
         // Ultimately the post-handler can choose to modify the response.
-        if (result && dispatch.handler->post)
+        if (result && dispatch.handler && dispatch.handler->post)
             dispatch.handler->post(dispatch.pipe, pRead, pWrite);
 
         return result;
