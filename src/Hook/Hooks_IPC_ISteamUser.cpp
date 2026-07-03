@@ -120,7 +120,7 @@ namespace {
             // For normally-detected Denuvo games the minted ticket carries the wrong
             // SteamID (pool account vs spoofed user) and Denuvo rejects it (error 54).
             if (LuaConfig::IsForcedDenuvo(appId)) {
-                if (auto fresh = EticketClient::FetchFreshEticket(appId, nonce, existingSteamId)) {
+                if (auto fresh = EticketClient::FetchFreshEticket(appId, nonce)) {
                     std::lock_guard<std::mutex> lock(g_freshEticketMutex);
                     g_freshEticket[appId] = std::move(*fresh);
                 }

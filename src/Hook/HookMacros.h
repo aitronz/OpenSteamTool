@@ -57,6 +57,7 @@ do {                                                              \
 
 #define INSTALL_HOOK_C(name)            INSTALL_HOOK(client_hModule, name)
 #define INSTALL_HOOK_U(name)            INSTALL_HOOK(ui_hModule, name)
+#define INSTALL_HOOK_D(name)            INSTALL_HOOK(client_hModule, name)
 
 // ── uninstall ───────────────────────────────────────────────────
 // Call between UNHOOK_BEGIN / UNHOOK_END.
@@ -72,6 +73,7 @@ do {                                                              \
     } while (0)
 #define UNINSTALL_HOOK_C(name)        UNINSTALL_HOOK(name)
 #define UNINSTALL_HOOK_U(name)        UNINSTALL_HOOK(name)
+#define UNINSTALL_HOOK_D(name)        UNINSTALL_HOOK(name)
 
 // ── resolve function definition ────────────────────────────────────
 //   RESOLVE_FUNC(CUtlMemoryGrow, void*, CUtlVector<AppId_t>*, int);

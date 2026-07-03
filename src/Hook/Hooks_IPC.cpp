@@ -83,7 +83,7 @@ namespace {
         if (!call.ok()) return dispatch;
 
         // Detect IClientUserStats calls for OnlineFix SetUserStatsContext wrapping
-        dispatch.userStatsCall = (call.interfaceID() == IClientUserStats);
+        dispatch.userStatsCall = (call.interfaceID() == EIPCInterface::IClientUserStats);
 
         // Lookup handler by interface ID + method hash
         dispatch.handler = FindHandler(call.interfaceID(), call.funcHash());

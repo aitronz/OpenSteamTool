@@ -175,7 +175,6 @@ namespace {
                 auth.denuvo = true;
             }
         }
-        }
         if (!auth.denuvo) auth.stage = Stage::None;
     }
 

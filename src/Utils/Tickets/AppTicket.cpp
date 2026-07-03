@@ -146,6 +146,13 @@ namespace AppTicket {
         return true;
     }
 
+    uint64_t ExtractSteamIdFromTicketBytes(const std::vector<uint8_t>& ticket) {
+        // Layout: [uint32 Size][uint32 Version][uint64 SteamID][...]
+        // SteamID starts at offset 8, needs at least 16 bytes total.
+        if (ticket.size() < kSteamIdTicketMinimumSize) return 0;
+        return reinterpret_cast<const uint64_t*>(ticket.data())[1];
+    }
+
     uint64_t GetSpoofSteamID(AppId_t appId) {
         // exclude those appids that are not in addappid
         if (!LuaConfig::HasDepot(appId)) {
