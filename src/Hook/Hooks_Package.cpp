@@ -13,7 +13,7 @@ namespace {
     RESOLVE_FUNC(ProcessPendingLicenseUpdates, bool,  void*);
 
     CAPTURE_THIS_FUNC(GetPackageInfo, PackageInfo*,g_pCPackageInfo,void* pThis, uint32 packageId, uint64 accessToken);
-    
+
     void* g_pCUser = nullptr;
     PackageInfo* g_pInjectedPackageInfo = nullptr;
     bool  g_licenseInitialized = false;
@@ -55,7 +55,7 @@ namespace {
             return false;
         }
 
-        // Inject all depots from config into the fake license. 
+        // Inject all depots from config into the fake license.
         std::vector<AppId_t> appIds = LuaConfig::GetAllDepotIds();
         if (!appIds.empty()) {
             uint32 oldSize = pPkg->AppIdVec.m_Size;
@@ -201,7 +201,7 @@ namespace Hooks_Package {
 
         HOOK_BEGIN();
         INSTALL_HOOK_C(CheckAppOwnership);
-        INSTALL_HOOK_D(DispatchCallbackByAppId);
+        // INSTALL_HOOK_D(DispatchCallbackByAppId);  // dormant - no signature pattern
         INSTALL_HOOK_D(SendCallbackToPipe);
         HOOK_END();
     }
@@ -209,7 +209,7 @@ namespace Hooks_Package {
     void Uninstall() {
         UNHOOK_BEGIN();
         UNINSTALL_HOOK_C(CheckAppOwnership);
-        UNINSTALL_HOOK(DispatchCallbackByAppId);
+        // UNINSTALL_HOOK(DispatchCallbackByAppId);  // dormant
         UNINSTALL_HOOK(SendCallbackToPipe);
         UNHOOK_END();
     }
